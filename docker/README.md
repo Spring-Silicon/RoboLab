@@ -73,6 +73,13 @@ docker run --rm -it \
 
 ## Cloud evaluation
 
+Recommended host: one NVIDIA L40S 48 GB (`g6e.2xlarge` or larger), Ubuntu
+22.04, 64 GB system RAM, and 500 GB SSD. NVIDIA driver 595.91.07 crashes
+Isaac Sim 5.0 during RTX scene initialization on the tested AWS image; use a
+compatible production driver such as 580.178.04 or the validated 570.211.01.
+An L4 24 GB (`g6.4xlarge`) is sufficient for a one-environment integration
+smoke but has less benchmark parallelism headroom.
+
 `cloud-compose.yaml` runs headless Isaac Lab evaluations against a remote
 compiled-policy server and serves the results dashboard on port 8080. The
 policy host must be reachable from the Docker host, typically over Tailscale.
