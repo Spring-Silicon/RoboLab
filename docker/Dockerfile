@@ -22,7 +22,7 @@ RUN apt-get update && \
 
 # openpi-client pinned to the Spring Silicon compiled-policy gateway commit.
 ARG OPENPI_REPO=https://github.com/Spring-Silicon/openpi
-ARG OPENPI_COMMIT=f4a769580ce7891746a838423407c7507b5abb5d
+ARG OPENPI_COMMIT=51faf261a8b8dde2bb6076d6f68d6c75109bed5c
 RUN /workspace/isaaclab/_isaac_sim/python.sh -m pip install --no-cache-dir --no-deps \
     "openpi-client @ git+${OPENPI_REPO}@${OPENPI_COMMIT}#subdirectory=packages/openpi-client"
 
