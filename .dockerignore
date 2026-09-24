@@ -24,8 +24,9 @@ dist/
 build/
 .eggs/
 
-# Docker files themselves
-docker/
+# Only the runtime launcher is needed inside the image.
+docker/*
+!docker/run_cloud_eval.sh
 
 # IDE and editor files
 .vscode/
