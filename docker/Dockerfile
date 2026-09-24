@@ -20,10 +20,11 @@ RUN apt-get update && \
     zip \
     && rm -rf /var/lib/apt/lists/*
 
-# openpi-client (pinned to openpi server commit, no local deps)
-ARG OPENPI_COMMIT=aa6420561529593114160d05e5ad155792b272f3
+# openpi-client pinned to the Spring Silicon compiled-policy gateway commit.
+ARG OPENPI_REPO=https://github.com/Spring-Silicon/openpi
+ARG OPENPI_COMMIT=f4a769580ce7891746a838423407c7507b5abb5d
 RUN /workspace/isaaclab/_isaac_sim/python.sh -m pip install --no-cache-dir --no-deps \
-    "openpi-client @ git+https://github.com/xuningy/openpi@${OPENPI_COMMIT}#subdirectory=packages/openpi-client"
+    "openpi-client @ git+${OPENPI_REPO}@${OPENPI_COMMIT}#subdirectory=packages/openpi-client"
 
 # Assets — each subdirectory is a separate layer for better caching.
 # Placed before code COPY so they stay cached across code changes.

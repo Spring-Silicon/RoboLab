@@ -6,6 +6,8 @@ import logging
 import numpy as np
 from openpi_client import image_tools, websocket_client_policy
 
+from policies.pi0_family.variants import COMPILED_VARIANTS
+from policies.pi0_family.variants import DEFAULT_HORIZONS as _DEFAULT_HORIZONS
 from robolab.eval.base_client import InferenceClient
 
 logger = logging.getLogger(__name__)
@@ -16,13 +18,7 @@ class Pi0DroidJointposClient(InferenceClient):
     # variants; each has its own training-time action_horizon. Callers pass
     # ``policy_variant`` to select the right default, or override directly via
     # ``open_loop_horizon``.
-    DEFAULT_HORIZONS: dict[str, int] = {
-        "pi0": 10,
-        "pi0_fast": 10,
-        "paligemma": 10,
-        "paligemma_fast": 10,
-        "pi05": 15,
-    }
+    DEFAULT_HORIZONS: dict[str, int] = _DEFAULT_HORIZONS
     FALLBACK_HORIZON: int = 15
 
     def __init__(
@@ -34,6 +30,7 @@ class Pi0DroidJointposClient(InferenceClient):
         policy_variant: str = "pi05",
     ) -> None:
         super().__init__()
+        self._server_chunk_indices: dict[int, int] = {}
         if open_loop_horizon is None:
             open_loop_horizon = self.DEFAULT_HORIZONS.get(policy_variant, self.FALLBACK_HORIZON)
         self.open_loop_horizon = int(open_loop_horizon)
@@ -49,8 +46,24 @@ class Pi0DroidJointposClient(InferenceClient):
 
     def _connect(self):
         if self._remote_uri is not None:
-            return websocket_client_policy.WebsocketClientPolicy(self._remote_uri)
-        return websocket_client_policy.WebsocketClientPolicy(self._remote_host, self._remote_port)
+            client = websocket_client_policy.WebsocketClientPolicy(self._remote_uri)
+        else:
+            client = websocket_client_policy.WebsocketClientPolicy(self._remote_host, self._remote_port)
+
+        if self.policy_variant in COMPILED_VARIANTS:
+            metadata = client.get_server_metadata()
+            if metadata.get("policy_id") != self.policy_variant:
+                raise RuntimeError(
+                    f"Requested {self.policy_variant!r}, but {self._display} serves "
+                    f"{metadata.get('policy_id')!r}."
+                )
+            server_horizon = metadata.get("action_horizon")
+            if server_horizon != self.open_loop_horizon:
+                raise RuntimeError(
+                    f"{self.policy_variant!r} reports action_horizon={server_horizon!r}; "
+                    f"RoboLab is configured for {self.open_loop_horizon}."
+                )
+        return client
 
     def _infer_with_retry(self, request: dict, max_retries: int = 3) -> dict:
         """Call server, reconnecting up to ``max_retries`` times on connection drop."""
@@ -86,6 +99,7 @@ class Pi0DroidJointposClient(InferenceClient):
         gripper_position = robot_state["gripper_pos"][env_id].clone().detach().cpu().numpy()
 
         return {
+            "env_id": env_id,
             "right_image": right_image,
             "wrist_image": wrist_image,
             "joint_position": joint_position,
@@ -93,7 +107,7 @@ class Pi0DroidJointposClient(InferenceClient):
         }
 
     def _pack_request(self, extracted_obs: dict, instruction: str) -> dict:
-        return {
+        request = {
             "observation/exterior_image_1_left": image_tools.resize_with_pad(
                 extracted_obs["right_image"], 224, 224
             ),
@@ -104,6 +118,16 @@ class Pi0DroidJointposClient(InferenceClient):
             "observation/gripper_position": extracted_obs["gripper_position"],
             "prompt": instruction,
         }
+        if self.policy_variant in COMPILED_VARIANTS:
+            env_id = int(extracted_obs["env_id"])
+            chunk_index = self._server_chunk_indices.get(env_id, 0)
+            request["_robolab"] = {
+                "episode": self._eval_episode_idx,
+                "env_id": env_id,
+                "chunk_index": chunk_index,
+            }
+            self._server_chunk_indices[env_id] = chunk_index + 1
+        return request
 
     def _query_server(self, request: dict) -> dict:
         return self._infer_with_retry(request)
@@ -117,6 +141,17 @@ class Pi0DroidJointposClient(InferenceClient):
         chunk = chunk.copy()
         chunk[..., -1] = (chunk[..., -1] > 0.5).astype(chunk.dtype)
         return chunk
+
+    def begin_episode(self, episode_idx: int) -> None:
+        super().begin_episode(episode_idx)
+        self._server_chunk_indices.clear()
+
+    def reset(self, *, env_id: int | None = None) -> None:
+        super().reset(env_id=env_id)
+        if env_id is None:
+            self._server_chunk_indices.clear()
+        else:
+            self._server_chunk_indices.pop(env_id, None)
 
     def _build_visualization(self, extracted_obs: dict) -> np.ndarray:
         img1 = image_tools.resize_with_pad(extracted_obs["right_image"], 224, 224)

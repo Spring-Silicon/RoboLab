@@ -3,9 +3,9 @@
 
 """Evaluate the Pi0 family of policy backends across registered tasks.
 
-Covers pi0, pi0_fast, pi05, paligemma, and paligemma_fast — all served by
-:class:`Pi0DroidJointposClient`, with per-variant defaults selected via
-``--policy``.
+Covers pi0, pi0_fast, pi05, pi05_compiled_regular,
+pi05_compiled_optimized, paligemma, and paligemma_fast — all served by
+:class:`Pi0DroidJointposClient`, with per-variant defaults selected via ``--policy``.
 """
 
 import argparse
@@ -15,7 +15,7 @@ import traceback
 import cv2  # noqa: F401 -- must import this before isaaclab. Do not remove
 from isaaclab.app import AppLauncher
 
-PI0_VARIANTS = ["pi0", "pi0_fast", "pi05", "paligemma", "paligemma_fast"]
+from policies.pi0_family.variants import PI0_VARIANTS
 
 parser = argparse.ArgumentParser(description="Evaluate a Pi0-family policy backend.")
 parser.add_argument("--policy", choices=PI0_VARIANTS, default="pi05",
@@ -57,9 +57,8 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 import robolab.constants  # noqa: E402
-from robolab.registrations.droid.auto_env_registrations_jointpos import auto_register_droid_envs  # noqa: E402
-
 from policies.pi0_family.client import Pi0DroidJointposClient  # noqa: E402
+from robolab.registrations.droid.auto_env_registrations_jointpos import auto_register_droid_envs  # noqa: E402
 
 robolab.constants.ENABLE_SUBTASK_PROGRESS_CHECKING = args_cli.enable_subtask
 robolab.constants.RECORD_IMAGE_DATA = args_cli.record_image_data

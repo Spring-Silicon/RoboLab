@@ -21,6 +21,7 @@ import sys
 from itertools import product
 from isaaclab.app import AppLauncher
 from robolab.constants import get_timestamp, DEFAULT_TASK_SUBFOLDERS # noqa
+from policies.pi0_family.variants import PI0_VARIANTS
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="")
@@ -32,7 +33,7 @@ parser.add_argument("--tag", nargs='+', default=None,
                        help="List of tags of tasks to evaluate on ")
 parser.add_argument("--task-dirs", nargs='+', default=DEFAULT_TASK_SUBFOLDERS,
                        help="List of task directories to evaluate on")
-parser.add_argument("--policy", choices=["pi0", "pi0_fast", "paligemma", "paligemma_fast", "pi05"], default="pi05",
+parser.add_argument("--policy", choices=PI0_VARIANTS, default="pi05",
                        help="Pi0-family variant to use (default: pi05)")
 parser.add_argument("--num-runs", "--num_runs", type=int, default=1,
                        help="Number of sequential runs per task (default: 1). Total episodes = num_runs * num_envs. Prefer increasing --num_envs for more episodes. Only increase --num-runs if you run out of GPU memory with the desired num_envs.")

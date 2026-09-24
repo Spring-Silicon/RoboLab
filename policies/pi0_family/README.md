@@ -1,9 +1,9 @@
 # Pi0 Family (OpenPI)
 
-The Pi0 family — `pi0`, `pi0_fast`, `pi05`, `paligemma`, and `paligemma_fast` — is served by a single client, `Pi0DroidJointposClient`, over a WebSocket-based OpenPI policy server. The variant is selected at runtime via `--policy`; each variant supplies its own per-variant defaults inside the client.
+The Pi0 family — `pi0`, `pi0_fast`, `pi05`, `pi05_compiled_regular`, `pi05_compiled_optimized`, `paligemma`, and `paligemma_fast` — is served by a single client, `Pi0DroidJointposClient`, over a WebSocket-based OpenPI policy server. The variant is selected at runtime via `--policy`; each variant supplies its own per-variant defaults inside the client.
 
 See the [policies README](../README.md) for the shared client architecture and common CLI options.
-For pi0-family variants, pass `--policy {pi0,pi0_fast,pi05,paligemma,paligemma_fast}`.
+For pi0-family variants, pass `--policy {pi0,pi0_fast,pi05,pi05_compiled_regular,pi05_compiled_optimized,paligemma,paligemma_fast}`.
 
 ## Install the server
 
@@ -46,6 +46,30 @@ XLA_PYTHON_CLIENT_MEM_FRACTION=0.5 uv run scripts/serve_policy.py policy:checkpo
     --policy.config=paligemma_binning_droid_jointpos \
     --policy.dir=gs://openpi-assets-simeval/paligemma_binning_droid_jointpos
 ```
+
+## Compiled Pi05 servers
+
+The Spring Silicon OpenPI fork provides `openpi-serve-compiled` for the two
+Intel B580 deployment artifacts. Both expose the same OpenPI WebSocket contract
+as Pi05 and return 15 absolute joint-position actions per request.
+
+```bash
+# Checkpoint-A OpenVINO W8A8 runtime.
+openpi-serve-compiled \
+    --variant pi05_compiled_regular \
+    --artifact-dir /opt/pi05-compiled-regular-openvino-a \
+    --host 0.0.0.0 --port 8000
+
+# Checkpoint-A fused SYCL runtime.
+openpi-serve-compiled \
+    --variant pi05_compiled_optimized \
+    --artifact-dir /opt/pi05-ssog-a-mc2-mux \
+    --host 0.0.0.0 --port 8000
+```
+
+Only one server may own the B580 at a time. RoboLab validates the server's
+`policy_id` and action horizon before evaluation, so a mislabeled run fails
+before the simulator starts sending observations.
 
 ## Run evaluation
 

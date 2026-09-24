@@ -70,3 +70,33 @@ docker run --rm -it \
 - **Assets**: `assets/` (~6.5GB)
 - **Python packages**: Everything in `requirements.txt`, installed via `pip install -e .`
 - **System tools**: `htop`, `nvtop`, `tmux`, `vim`, `git-lfs`, `zip`
+
+## Cloud evaluation
+
+`cloud-compose.yaml` runs headless Isaac Lab evaluations against a remote
+compiled-policy server and serves the results dashboard on port 8080. The
+policy host must be reachable from the Docker host, typically over Tailscale.
+
+```bash
+# Build the pinned Isaac Lab 2.2 / Isaac Sim 5.0 image.
+docker compose -f docker/cloud-compose.yaml build eval
+
+# Run one task against the regular compiled policy.
+POLICY_HOST=100.123.6.81 \
+POLICY_VARIANT=pi05_compiled_regular \
+TASKS="BananaInBowlTask" \
+docker compose -f docker/cloud-compose.yaml run --rm eval
+
+# Run the same task against the optimized policy after switching the server.
+POLICY_HOST=100.123.6.81 \
+POLICY_VARIANT=pi05_compiled_optimized \
+TASKS="BananaInBowlTask" \
+docker compose -f docker/cloud-compose.yaml run --rm eval
+
+# Browse completed runs at http://<host>:8080.
+docker compose -f docker/cloud-compose.yaml up -d dashboard
+```
+
+The dashboard is a results viewer; it does not start Isaac Sim evaluations.
+Use the `eval` service for launches. Only one compiled policy server may own
+the Intel B580 at a time.
