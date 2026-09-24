@@ -26,7 +26,6 @@ pyarrow
 
 # Misc
 tqdm
-tyro
 
 # Environment variable management
 python-dotenv

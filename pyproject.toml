@@ -39,7 +39,6 @@ dependencies = [
     "pandas",
     # Misc
     "tqdm",
-    "tyro",
     "python-dotenv",
     "setuptools<81",
     # Dashboard (robolab-dashboard CLI); kept in the default install since
