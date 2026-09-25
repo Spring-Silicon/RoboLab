@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DEFAULT_HOST="${ROBOLAB_GPU_HOST:-98.80.121.157}"
+HOST="$DEFAULT_HOST"; USER_NAME="ubuntu"; OUTPUT=""
+usage() {
+  cat <<EOF
+Usage: robolab-run [options] MODEL TASK
+
+Models: pi0, pi0_fast, pi05, paligemma, paligemma_fast,
+        pi05_spring_regular, pi05_spring_optimized
+Options:
+  --host HOST       GPU host (default: $DEFAULT_HOST)
+  --user USER       SSH user (default: ubuntu)
+  --output NAME     Result folder name
+  -h, --help        Show this help
+
+Example:
+  robolab-run pi05_spring_optimized AnimalsInBinTask
+EOF
+}
+while (($#)); do
+  case "$1" in
+    --host) HOST="${2:?missing host}"; shift 2 ;;
+    --user) USER_NAME="${2:?missing user}"; shift 2 ;;
+    --output) OUTPUT="${2:?missing output}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    --*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
+[[ $# -eq 2 ]] || { usage >&2; exit 2; }
+MODEL="$1"; TASK="$2"
+RUNNER="$HOME/.local/share/robolab/runner/run-episode.sh"
+if [[ -n "$OUTPUT" ]]; then
+  exec "$RUNNER" "$HOST" "$MODEL" "$TASK" "$OUTPUT" "$USER_NAME"
+fi
+exec "$RUNNER" "$HOST" "$MODEL" "$TASK" "$(date -u +%Y%m%dT%H%M%SZ)_${MODEL}_${TASK}" "$USER_NAME"

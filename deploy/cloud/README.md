@@ -13,14 +13,14 @@ curl -fsSLO https://raw.githubusercontent.com/Spring-Silicon/RoboLab/main/deploy
 bash bootstrap-ec2.sh
 ```
 
-On Cleveland:
+On Cleveland, double-click **Run RoboLab** or use:
 
 ```bash
-cd ~/Desktop/robolab-run
-./setup-ec2.sh EC2_ADDRESS
-./run-episode.sh EC2_ADDRESS pi05_spring_optimized AnimalsInBinTask
-# model: pi0, pi0_fast, pi05, paligemma, paligemma_fast, pi05_spring_regular, or pi05_spring_optimized
+robolab-run --help
+robolab-run pi05_spring_optimized AnimalsInBinTask
 ```
+
+Double-click **RoboLab Dashboard** to view results.
 
 
 ## Other providers

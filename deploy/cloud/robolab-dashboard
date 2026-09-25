@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IP="${ROBOLAB_DASHBOARD_IP:-$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([^ ]*\).*/\1/p')}"
+exec xdg-open "http://$IP:8080"

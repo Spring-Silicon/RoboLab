@@ -50,7 +50,7 @@ if (( COMPILED )); then
     curl -fsS http://127.0.0.1:8000/healthz >/dev/null && break
     sleep 5
   done
-  "$HOME/.venv-compiled-policy/bin/python" "$HOME/Desktop/openpi/deploy/smoke_compiled_policy.py" \
+  "$HOME/.venv-compiled-policy/bin/python" "$HOME/.local/share/robolab/openpi/deploy/smoke_compiled_policy.py" \
     --expected-policy "$VARIANT"
 fi
 
