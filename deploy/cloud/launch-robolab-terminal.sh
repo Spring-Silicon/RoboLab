@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 clear
-robolab-run --help
+RUN="$HOME/.local/bin/robolab-run"
+"$RUN" --help
 printf '\nEdit the command, then press Enter:\n'
-read -er -i 'robolab-run pi05_spring_optimized AnimalsInBinTask' COMMAND
-[[ -n "$COMMAND" ]] && bash -lc "$COMMAND"
+read -er -i "$RUN pi05_spring_optimized AnimalsInBinTask" COMMAND
 printf '\nPress Enter to close.'
 read -r
