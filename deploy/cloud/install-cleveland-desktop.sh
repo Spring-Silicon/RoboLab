@@ -16,6 +16,8 @@ cp -a "$APP/RoboLab/deploy/cloud/." "$APP/runner/"
 chmod +x "$APP/runner"/*.sh "$APP/runner/robolab-run" "$APP/runner/robolab-dashboard"
 ln -sfn "$APP/runner/robolab-run" "$BIN/robolab-run"
 ln -sfn "$APP/runner/robolab-dashboard" "$BIN/robolab-dashboard"
+sudo ln -sfn "$BIN/robolab-run" /usr/local/bin/robolab-run
+sudo ln -sfn "$BIN/robolab-dashboard" /usr/local/bin/robolab-dashboard
 uv pip install --python "$HOME/.venv-compiled-policy/bin/python" --upgrade \
   -e "$APP/openpi/packages/openpi-client[compiled]"
 
