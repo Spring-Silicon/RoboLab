@@ -16,11 +16,17 @@ cp -a "$APP/RoboLab/deploy/cloud/." "$APP/runner/"
 chmod +x "$APP/runner"/*.sh "$APP/runner/robolab-run" "$APP/runner/robolab-dashboard"
 ln -sfn "$APP/runner/robolab-run" "$BIN/robolab-run"
 ln -sfn "$APP/runner/robolab-dashboard" "$BIN/robolab-dashboard"
+uv pip install --python "$HOME/.venv-compiled-policy/bin/python" --upgrade \
+  -e "$APP/openpi/packages/openpi-client[compiled]"
 
 mkdir -p "$HOME/.config/systemd/user"
 cp "$APP/openpi/deploy/user/spring-openpi-compiled@.service" "$HOME/.config/systemd/user/"
 cp "$APP/openpi/deploy/robolab-cloud-policy-tunnel.service" "$HOME/.config/systemd/user/"
 systemctl --user daemon-reload
+if [[ -f "$HOME/.config/spring-openpi/cloud.env" ]]; then
+  source "$HOME/.config/spring-openpi/cloud.env"
+  "$APP/runner/setup-ec2.sh" "$CLOUD_HOST"
+fi
 systemctl --user start spring-openpi-compiled@pi05_compiled_regular.service
 
 cat > "$DESKTOP/RoboLab Dashboard.desktop" <<EOF
