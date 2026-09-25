@@ -25,7 +25,24 @@ esac
 
 mkdir -p "$ROOT/logs"
 LOG="$ROOT/logs/$OUTPUT.log"
-exec > >(tee -a "$LOG") 2>&1
+USE_COLOR=0
+[[ -t 1 ]] && USE_COLOR=1
+exec > >(tee >(sed -u $'s/\033\\[[0-9;]*m//g' >> "$LOG")) 2>&1
+format_simulator_output() {
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      *"[Warning]"*|*"Warning:"*|Warp\ CUDA\ error*|cat:\ *cpufreq*)
+        if [[ "$USE_COLOR" == 1 ]]; then
+          printf '\033[1;33m[WARNING] %s\033[0m\n' "$line"
+        else
+          printf '[WARNING] %s\n' "$line"
+        fi
+        ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done
+}
 exec 9>"$ROOT/run.lock"
 if ! flock -n 9; then
   echo "Another RoboLab episode is already running on Cleveland. Wait for it to finish, then try again." >&2
@@ -71,15 +88,9 @@ printf '[3/4] Checking policy inference...\n'
 "$HOME/.venv-compiled-policy/bin/python" "$HOME/.local/share/robolab/openpi/deploy/smoke_compiled_policy.py" \
   --expected-policy "$VARIANT"
 printf '[4/4] Running %s in Isaac Sim...\n' "$TASK"
-cat <<'NOTICE'
-      Note: Isaac Sim may print "GLFW initialization failed", "failed to open
-      the default display", or "Warp CUDA error 36" while starting headless.
-      These messages are expected here and do not mean the run failed. Wait for
-      "[RoboLab] Running" and the final "DONE" line.
-NOTICE
 
 ssh -i "$KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$USER_NAME@$HOST" \
-  bash -s -- "$IMAGE" "$VARIANT" "$TASK" "$OUTPUT" <<'REMOTE'
+  bash -s -- "$IMAGE" "$VARIANT" "$TASK" "$OUTPUT" 2>&1 <<'REMOTE' | format_simulator_output
 set -euo pipefail
 IMAGE="$1"; VARIANT="$2"; TASK="$3"; OUTPUT="$4"
 POLICY_PORT=18000
