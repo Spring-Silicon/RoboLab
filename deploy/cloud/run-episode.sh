@@ -14,7 +14,7 @@ DASHBOARD_IP="${ROBOLAB_DASHBOARD_IP:-$(ip -4 route get 1.1.1.1 | sed -n 's/.* s
 [[ "$HOST" =~ ^[A-Za-z0-9.:-]+$ && "$TASK" =~ ^[A-Za-z0-9_]+$ && "$OUTPUT" =~ ^[A-Za-z0-9_.-]+$ ]] \
   || { echo "host, task, or output contains unsupported characters" >&2; exit 2; }
 
-COMPILED=0; CONFIG=""; CHECKPOINT=""
+COMPILED=0; CONFIG="-"; CHECKPOINT="-"
 case "$MODEL" in
   pi05_spring_regular) VARIANT=pi05_compiled_regular; COMPILED=1 ;;
   pi05_spring_optimized) VARIANT=pi05_compiled_optimized; COMPILED=1 ;;
@@ -59,7 +59,7 @@ ssh -i "$KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$USER_NAME@$
 set -euo pipefail
 IMAGE="$1"; OPENPI_IMAGE="$2"; VARIANT="$3"; TASK="$4"; OUTPUT="$5"; CONFIG="$6"; CHECKPOINT="$7"
 POLICY_PORT=18000
-if [[ -n "$CONFIG" ]]; then
+if [[ "$CONFIG" != "-" ]]; then
   mkdir -p "$HOME/openpi-cache"
   sudo docker pull "$OPENPI_IMAGE"
   sudo docker rm -f openpi-policy >/dev/null 2>&1 || true
