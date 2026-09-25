@@ -19,7 +19,7 @@ services:
       POLICY_PORT: ${POLICY_PORT:-8000}
       TASKS: ${TASKS:-BananaInBowlTask}
       NUM_ENVS: ${NUM_ENVS:-1}
-      VIDEO_MODE: ${VIDEO_MODE:-none}
+      VIDEO_MODE: ${VIDEO_MODE:-all}
     volumes:
       - ../output:/workspace/robolab/output
       - isaac-cache:/root/.cache/ov

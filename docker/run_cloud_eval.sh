@@ -5,7 +5,7 @@ set -euo pipefail
 POLICY_VARIANT="${POLICY_VARIANT:-pi05_compiled_regular}"
 POLICY_PORT="${POLICY_PORT:-8000}"
 NUM_ENVS="${NUM_ENVS:-1}"
-VIDEO_MODE="${VIDEO_MODE:-none}"
+VIDEO_MODE="${VIDEO_MODE:-all}"
 TASKS_TEXT="${TASKS:-BananaInBowlTask}"
 read -r -a TASK_ARGS <<<"$TASKS_TEXT"
 
