@@ -33,7 +33,7 @@ grep -qxF "$SEATTLE_KEY" "$HOME/.ssh/authorized_keys" || printf '%s\n' "$SEATTLE
 chmod 600 "$HOME/.ssh/authorized_keys"
 
 sudo docker pull "$IMAGE"
-sudo docker rm -f robolab-dashboard >/dev/null 2>&1 || true
+sudo docker rm -f robolab-dashboard docker-dashboard-1 >/dev/null 2>&1 || true
 sudo docker run -d --name robolab-dashboard --restart unless-stopped --network host \
   -v "$HOME/robolab-output:/workspace/robolab/output:ro" \
   -v "$HOME/.config/robolab-dashboard:/root/.config/robolab-dashboard" \
