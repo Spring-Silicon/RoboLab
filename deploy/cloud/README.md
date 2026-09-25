@@ -4,23 +4,24 @@
 
 We have a preconfigured host for you at `ubuntu@98.80.121.157` (it is a g6.4xlarge with this setup: L4 24 GB, Ubuntu 22.04, driver 580, 500 GB disk). It is currently already running with RoboLab installed.
 
-To create another, use Ubuntu 22.04, an NVIDIA GPU with at least 16 GB VRAM, 32 GB RAM, 500 GB disk, and driver 570/580. Notably, not 595. 
+To create another, use Ubuntu 22.04, an NVIDIA GPU with at least 16 GB VRAM, 32 GB RAM, 500 GB disk, and driver 570/580. Notably, not 595.
 
-Allow SSH from Seattle's current public IP (`curl -4 https://checkip.amazonaws.com`), then run:
+Allow SSH from Cleveland's current public IP (`curl -4 https://checkip.amazonaws.com`), then run:
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/Spring-Silicon/RoboLab/main/deploy/cloud/bootstrap-ec2.sh
 bash bootstrap-ec2.sh
 ```
 
-On Seattle:
+On Cleveland:
 
 ```bash
 cd ~/Desktop/robolab-run
 ./setup-ec2.sh EC2_ADDRESS
 ./run-episode.sh EC2_ADDRESS optimized AnimalsInBinTask
-# model: regular or optimized
+# model: pi0, pi0_fast, pi05, paligemma, paligemma_fast, regular, or optimized
 ```
+
 
 ## Other providers
 

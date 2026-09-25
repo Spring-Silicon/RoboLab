@@ -2,7 +2,7 @@
 set -euo pipefail
 
 IMAGE="${ROBOLAB_IMAGE:-public.ecr.aws/m4l3e1i0/spring-silicon/robolab:2026-09-25}"
-SEATTLE_KEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAzmkK6h/tPp7Vx1GbRkMcgy6BEN7ItDImH4HpYyknv robolab-cloud-tunnel'
+RUNNER_KEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILHvpxJs8mPTqigg2ToW1DF2C2bDsr/Bwr02ZeNi29Hx robolab-cloud-tunnel'
 
 command -v nvidia-smi >/dev/null || { echo "Use an Ubuntu 22.04 NVIDIA GPU AMI with drivers installed." >&2; exit 2; }
 DRIVER="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | cut -d. -f1 | head -1)"
@@ -29,7 +29,7 @@ sudo usermod -aG docker "$USER"
 mkdir -p "$HOME/.ssh" "$HOME/robolab-output" "$HOME/.config/robolab-dashboard"
 chmod 700 "$HOME/.ssh"
 touch "$HOME/.ssh/authorized_keys"
-grep -qxF "$SEATTLE_KEY" "$HOME/.ssh/authorized_keys" || printf '%s\n' "$SEATTLE_KEY" >> "$HOME/.ssh/authorized_keys"
+grep -qxF "$RUNNER_KEY" "$HOME/.ssh/authorized_keys" || printf '%s\n' "$RUNNER_KEY" >> "$HOME/.ssh/authorized_keys"
 chmod 600 "$HOME/.ssh/authorized_keys"
 
 sudo docker pull "$IMAGE"

@@ -17,8 +17,8 @@ DEFAULT_HORIZONS: dict[str, int] = {
     "pi05": 15,
     "pi05_compiled_regular": 15,
     "pi05_compiled_optimized": 15,
-    "paligemma": 10,
-    "paligemma_fast": 10,
+    "paligemma": 15,
+    "paligemma_fast": 15,
 }
 
 COMPILED_VARIANTS = frozenset({"pi05_compiled_regular", "pi05_compiled_optimized"})
