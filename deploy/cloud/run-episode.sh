@@ -71,6 +71,12 @@ printf '[3/4] Checking policy inference...\n'
 "$HOME/.venv-compiled-policy/bin/python" "$HOME/.local/share/robolab/openpi/deploy/smoke_compiled_policy.py" \
   --expected-policy "$VARIANT"
 printf '[4/4] Running %s in Isaac Sim...\n' "$TASK"
+cat <<'NOTICE'
+      Note: Isaac Sim may print "GLFW initialization failed", "failed to open
+      the default display", or "Warp CUDA error 36" while starting headless.
+      These messages are expected here and do not mean the run failed. Wait for
+      "[RoboLab] Running" and the final "DONE" line.
+NOTICE
 
 ssh -i "$KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$USER_NAME@$HOST" \
   bash -s -- "$IMAGE" "$VARIANT" "$TASK" "$OUTPUT" <<'REMOTE'
