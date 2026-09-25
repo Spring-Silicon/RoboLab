@@ -26,7 +26,12 @@ esac
 mkdir -p "$ROOT/logs"
 LOG="$ROOT/logs/$OUTPUT.log"
 exec > >(tee -a "$LOG") 2>&1
-set -x
+exec 9>"$ROOT/run.lock"
+if ! flock -n 9; then
+  echo "Another RoboLab episode is already running on Cleveland. Wait for it to finish, then try again." >&2
+  exit 4
+fi
+printf '[1/4] Connecting to the cloud simulator...\n'
 "$ROOT/setup-ec2.sh" "$HOST" "$USER_NAME"
 
 if systemctl --user cat spring-openpi-compiled@.service >/dev/null 2>&1; then
@@ -39,15 +44,33 @@ restore_regular() {
   "${POLICYCTL[@]}" start spring-openpi-compiled@pi05_compiled_regular.service || true
 }
 trap restore_regular EXIT
+printf '[2/4] Starting %s on the Intel B580 (cold start takes about 45 seconds)' "$MODEL"
 "${POLICYCTL[@]}" stop spring-openpi-compiled@pi05_compiled_regular.service \
-  spring-openpi-compiled@pi05_compiled_optimized.service || true
+  spring-openpi-compiled@pi05_compiled_optimized.service >/dev/null 2>&1 || true
 "${POLICYCTL[@]}" start "spring-openpi-compiled@${VARIANT}.service"
+POLICY_READY=0
 for _ in $(seq 1 180); do
-  curl -fsS http://127.0.0.1:8000/healthz >/dev/null && break
+  if curl -fs http://127.0.0.1:8000/healthz >/dev/null 2>&1; then
+    POLICY_READY=1
+    break
+  fi
+  if ! "${POLICYCTL[@]}" is-active --quiet "spring-openpi-compiled@${VARIANT}.service"; then
+    printf '\nPolicy service stopped during startup. Recent service log:\n' >&2
+    journalctl --user -u "spring-openpi-compiled@${VARIANT}.service" -n 40 --no-pager >&2 || true
+    exit 1
+  fi
+  printf '.'
   sleep 5
 done
+printf '\n'
+if [[ "$POLICY_READY" != 1 ]]; then
+  echo "Policy did not become ready within 15 minutes." >&2
+  exit 1
+fi
+printf '[3/4] Checking policy inference...\n'
 "$HOME/.venv-compiled-policy/bin/python" "$HOME/.local/share/robolab/openpi/deploy/smoke_compiled_policy.py" \
   --expected-policy "$VARIANT"
+printf '[4/4] Running %s in Isaac Sim...\n' "$TASK"
 
 ssh -i "$KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$USER_NAME@$HOST" \
   bash -s -- "$IMAGE" "$VARIANT" "$TASK" "$OUTPUT" <<'REMOTE'
