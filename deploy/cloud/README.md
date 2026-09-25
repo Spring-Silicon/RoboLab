@@ -1,6 +1,6 @@
 # RoboLab runner
 
-Use an Ubuntu 22.04 NVIDIA GPU EC2 instance with at least 16 GB VRAM, 32 GB RAM, 500 GB disk, a working NVIDIA driver (570/580; not 595), and inbound SSH from Seattle (`208.64.29.18`). On the EC2 instance run:
+Use an Ubuntu 22.04 NVIDIA GPU EC2 instance with at least 16 GB VRAM, 32 GB RAM, 500 GB disk, and driver 570/580 (not 595). Its security group must allow SSH from Seattle's current public IP; get it on Seattle with `curl -4 https://checkip.amazonaws.com`.
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/Spring-Silicon/RoboLab/main/deploy/cloud/bootstrap-ec2.sh
@@ -16,4 +16,4 @@ cd ~/Desktop/robolab-run
 # model may be: regular or optimized
 ```
 
-The runner switches the Seattle policy, opens the SSH tunnel, runs one video-recorded episode, restores the regular policy, and logs every command under `logs/`. Results appear at **http://100.123.6.81:8080**. Select Results → the output run → task → episode to play `viewport` or `recording`; the EC2 dashboard is also at `http://EC2_ADDRESS:8080` if its security group allows that port.
+The runner derives Seattle's Tailscale address automatically, switches the policy, records video, restores the regular policy, and logs commands under `logs/`. Run `tailscale ip -4`, browse to `http://<that-IP>:8080`, then select Results → run → task → episode.
