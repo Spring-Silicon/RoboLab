@@ -24,12 +24,13 @@ uv pip install --python "$HOME/.venv-compiled-policy/bin/python" --upgrade \
 mkdir -p "$HOME/.config/systemd/user"
 cp "$APP/openpi/deploy/user/spring-openpi-compiled@.service" "$HOME/.config/systemd/user/"
 cp "$APP/openpi/deploy/robolab-cloud-policy-tunnel.service" "$HOME/.config/systemd/user/"
+cp "$APP/openpi/deploy/robolab-cloud-dashboard-tunnel.service" "$HOME/.config/systemd/user/"
 systemctl --user daemon-reload
+systemctl --user enable robolab-cloud-dashboard-tunnel.service
 if [[ -f "$HOME/.config/spring-openpi/cloud.env" ]]; then
   source "$HOME/.config/spring-openpi/cloud.env"
   "$APP/runner/setup-ec2.sh" "$CLOUD_HOST"
 fi
-systemctl --user start spring-openpi-compiled@pi05_compiled_regular.service
 
 cat > "$DESKTOP/RoboLab Dashboard.desktop" <<EOF
 [Desktop Entry]

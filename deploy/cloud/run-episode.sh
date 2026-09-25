@@ -10,6 +10,7 @@ IMAGE="${ROBOLAB_IMAGE:-public.ecr.aws/m4l3e1i0/spring-silicon/robolab:2026-09-2
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KEY="$HOME/.ssh/robolab-cloud-tunnel"
 DASHBOARD_IP="${ROBOLAB_DASHBOARD_IP:-$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([^ ]*\).*/\1/p')}"
+LOCAL_POLICY_PORT="${ROBOLAB_POLICY_PORT:-8100}"
 [[ "$HOST" =~ ^[A-Za-z0-9.:-]+$ && "$TASK" =~ ^[A-Za-z0-9_]+$ && "$OUTPUT" =~ ^[A-Za-z0-9_.-]+$ ]] \
   || { echo "host, task, or output contains unsupported characters" >&2; exit 2; }
 
@@ -48,6 +49,11 @@ if ! flock -n 9; then
   echo "Another RoboLab episode is already running on Cleveland. Wait for it to finish, then try again." >&2
   exit 4
 fi
+if systemctl --user is-active --quiet franka-droid-policy.service; then
+  echo "Cleveland is currently running the real-robot Franka/DROID workload." >&2
+  echo "RoboLab left it untouched. Run this episode after that workload is intentionally released." >&2
+  exit 5
+fi
 printf '[1/4] Connecting to the cloud simulator...\n'
 "$ROOT/setup-ec2.sh" "$HOST" "$USER_NAME"
 
@@ -56,18 +62,18 @@ if systemctl --user cat spring-openpi-compiled@.service >/dev/null 2>&1; then
 else
   POLICYCTL=(sudo systemctl)
 fi
-restore_regular() {
-  "${POLICYCTL[@]}" stop spring-openpi-compiled@pi05_compiled_optimized.service || true
-  "${POLICYCTL[@]}" start spring-openpi-compiled@pi05_compiled_regular.service || true
+stop_spring_policies() {
+  "${POLICYCTL[@]}" stop spring-openpi-compiled@pi05_compiled_regular.service \
+    spring-openpi-compiled@pi05_compiled_optimized.service || true
 }
-trap restore_regular EXIT
+trap stop_spring_policies EXIT
 printf '[2/4] Starting %s on the Intel B580 (cold start takes about 45 seconds)' "$MODEL"
 "${POLICYCTL[@]}" stop spring-openpi-compiled@pi05_compiled_regular.service \
   spring-openpi-compiled@pi05_compiled_optimized.service >/dev/null 2>&1 || true
 "${POLICYCTL[@]}" start "spring-openpi-compiled@${VARIANT}.service"
 POLICY_READY=0
 for _ in $(seq 1 180); do
-  if curl -fs http://127.0.0.1:8000/healthz >/dev/null 2>&1; then
+  if curl -fs "http://127.0.0.1:$LOCAL_POLICY_PORT/healthz" >/dev/null 2>&1; then
     POLICY_READY=1
     break
   fi
@@ -86,7 +92,7 @@ if [[ "$POLICY_READY" != 1 ]]; then
 fi
 printf '[3/4] Checking policy inference...\n'
 "$HOME/.venv-compiled-policy/bin/python" "$HOME/.local/share/robolab/openpi/deploy/smoke_compiled_policy.py" \
-  --expected-policy "$VARIANT"
+  --port "$LOCAL_POLICY_PORT" --expected-policy "$VARIANT"
 printf '[4/4] Running %s in Isaac Sim...\n' "$TASK"
 
 ssh -i "$KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$USER_NAME@$HOST" \

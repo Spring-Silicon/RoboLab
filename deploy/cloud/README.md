@@ -21,6 +21,7 @@ robolab-run pi05_spring_optimized AnimalsInBinTask
 ```
 
 Only `pi05_spring_regular` and `pi05_spring_optimized` are enabled. Other OpenPI models fail before EC2 launch until a validated B580 backend exists.
+Cleveland's real-robot Franka/DROID workload has priority. If it is active, `robolab-run` exits without stopping or changing it; run the cloud episode after the real-robot workload is intentionally released. Spring policy gateways use local port `8100`, leaving the DROID runtime on `8000`.
 
 Double-click **RoboLab Dashboard** to view results.
 

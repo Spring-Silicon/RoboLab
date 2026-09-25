@@ -13,7 +13,7 @@ ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=acc
 mkdir -p "$HOME/.config/spring-openpi"
 printf 'CLOUD_HOST=%s\nDASHBOARD_FORWARD=%s:8080:127.0.0.1:8080\n' "$HOST" "$DASHBOARD_IP" \
   > "$HOME/.config/spring-openpi/cloud.env"
-systemctl --user restart robolab-cloud-policy-tunnel.service
+systemctl --user restart robolab-cloud-dashboard-tunnel.service robolab-cloud-policy-tunnel.service
 for _ in $(seq 1 20); do
   curl -fs "http://$DASHBOARD_IP:8080/api/runs" >/dev/null 2>&1 && break
   sleep 1
