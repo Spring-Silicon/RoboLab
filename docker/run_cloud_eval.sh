@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${POLICY_HOST:?Set POLICY_HOST to the compiled-policy server host or Tailscale IP}"
+: "${POLICY_HOST:?Set POLICY_HOST to the compiled-policy server or tunnel host}"
 POLICY_VARIANT="${POLICY_VARIANT:-pi05_compiled_regular}"
 POLICY_PORT="${POLICY_PORT:-8000}"
 NUM_ENVS="${NUM_ENVS:-1}"

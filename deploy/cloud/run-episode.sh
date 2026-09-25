@@ -9,7 +9,7 @@ USER_NAME="${5:-ubuntu}"
 IMAGE="${ROBOLAB_IMAGE:-public.ecr.aws/m4l3e1i0/spring-silicon/robolab:2026-09-25}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KEY="$HOME/.ssh/robolab-cloud-tunnel"
-TAIL_IP="${SEATTLE_TAILSCALE_IP:-$(tailscale ip -4)}"
+DASHBOARD_IP="${SEATTLE_DASHBOARD_IP:-$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([^ ]*\).*/\1/p')}"
 [[ "$HOST" =~ ^[A-Za-z0-9.:-]+$ && "$TASK" =~ ^[A-Za-z0-9_]+$ && "$OUTPUT" =~ ^[A-Za-z0-9_.-]+$ ]] \
   || { echo "host, task, or output contains unsupported characters" >&2; exit 2; }
 case "$MODEL" in
@@ -51,4 +51,4 @@ sudo docker run --rm --gpus all --network host --ipc host --shm-size 16g \
   --output-folder-name "$OUTPUT"
 REMOTE
 
-printf 'DONE output=%s UI=http://%s:8080 log=%s\n' "$OUTPUT" "$TAIL_IP" "$LOG"
+printf 'DONE output=%s UI=http://%s:8080 log=%s\n' "$OUTPUT" "$DASHBOARD_IP" "$LOG"

@@ -80,22 +80,22 @@ compatible production driver such as 580.178.04 or the validated 570.211.01.
 An L4 24 GB (`g6.4xlarge`) is sufficient for a one-environment integration
 smoke but has less benchmark parallelism headroom.
 
-`cloud-compose.yaml` runs headless Isaac Lab evaluations against a remote
-compiled-policy server and serves the results dashboard on port 8080. The
-policy host must be reachable from the Docker host, typically over Tailscale.
+`cloud-compose.yaml` runs headless Isaac Lab evaluations and serves results on
+port 8080. With the Seattle runner, the policy tunnel is EC2
+`127.0.0.1:18000`; no Tailscale installation is required on either host.
 
 ```bash
 # Build the pinned Isaac Lab 2.2 / Isaac Sim 5.0 image.
 docker compose -f docker/cloud-compose.yaml build eval
 
 # Run one task against the regular compiled policy.
-POLICY_HOST=100.123.6.81 \
+POLICY_HOST=127.0.0.1 POLICY_PORT=18000 \
 POLICY_VARIANT=pi05_compiled_regular \
 TASKS="BananaInBowlTask" \
 docker compose -f docker/cloud-compose.yaml run --rm eval
 
 # Run the same task against the optimized policy after switching the server.
-POLICY_HOST=100.123.6.81 \
+POLICY_HOST=127.0.0.1 POLICY_PORT=18000 \
 POLICY_VARIANT=pi05_compiled_optimized \
 TASKS="BananaInBowlTask" \
 docker compose -f docker/cloud-compose.yaml run --rm eval

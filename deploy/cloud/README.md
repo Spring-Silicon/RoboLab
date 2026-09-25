@@ -16,4 +16,4 @@ cd ~/Desktop/robolab-run
 # model may be: regular or optimized
 ```
 
-The runner derives Seattle's Tailscale address automatically, switches the policy, records video, restores the regular policy, and logs commands under `logs/`. Run `tailscale ip -4`, browse to `http://<that-IP>:8080`, then select Results → run → task → episode.
+The runner derives Seattle's current LAN address, switches the policy, records video, restores the regular policy, and logs commands under `logs/`. On Seattle run `ip -4 route get 1.1.1.1`; browse to `http://<src-IP>:8080` from the same LAN.
