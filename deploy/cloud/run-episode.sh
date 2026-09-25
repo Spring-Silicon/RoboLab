@@ -66,7 +66,7 @@ if [[ -n "$CONFIG" ]]; then
   sudo docker run -d --name openpi-policy --gpus all --network host \
     -e XLA_PYTHON_CLIENT_MEM_FRACTION=0.35 -e OPENPI_DATA_HOME=/openpi_assets \
     -v "$HOME/openpi-cache:/openpi_assets" "$OPENPI_IMAGE" \
-    policy:checkpoint --policy.config="$CONFIG" --policy.dir="$CHECKPOINT" --port 8000 >/dev/null
+    --port 8000 policy:checkpoint --policy.config="$CONFIG" --policy.dir="$CHECKPOINT" >/dev/null
   trap 'sudo docker rm -f openpi-policy >/dev/null 2>&1 || true' EXIT
   for _ in $(seq 1 720); do
     curl -fsS http://127.0.0.1:8000/healthz >/dev/null && break
