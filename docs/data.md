@@ -207,12 +207,15 @@ The main results file, located at the top level of the output folder. Uses JSONL
   - `ee_speed_max`: Maximum end-effector speed (m/s)
   - `ee_speed_mean`: Mean end-effector speed (m/s)
 - `timing`: Wall-clock timing breakdown per episode (always recorded)
-  - `policy_inference_s`: Total time spent in policy server queries
-  - `policy_inference_avg_ms`: Average policy query time per step
+  - `policy_inference_s`: Total wall time spent in policy-client calls across control steps
+  - `policy_inference_avg_ms`: Mean policy-client time per control step
+  - `policy_inference_median_ms`: Median policy-client time per control step
   - `env_step_s`: Total time spent in `env.step()` (physics + observations + termination)
-  - `env_step_avg_ms`: Average env step time per step
+  - `env_step_avg_ms`: Mean environment-step time
+  - `env_step_median_ms`: Median environment-step time
   - `video_write_s`: Total time spent encoding video frames
-  - `video_write_avg_ms`: Average video write time per step
+  - `video_write_avg_ms`: Mean video-write time
+  - `video_write_median_ms`: Median video-write time
   - `wall_total_s`: Sum of all timed sections
   - `it_per_sec`: Steps per second (`steps / wall_total_s`)
 - `events`: Error event counts, extracted from episode log files at the end of each episode

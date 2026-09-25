@@ -1822,6 +1822,7 @@ async function renderEpisode(runId, task, envId, runIndex) {
   }
   const videos = ep.videos || [];
   const policyAvgMs = ep.timing?.policy_inference_avg_ms;
+  const policyMedianMs = ep.timing?.policy_inference_median_ms;
 
   const pane = $('#pane');
   pane.innerHTML = '';
@@ -1837,7 +1838,8 @@ async function renderEpisode(runId, task, envId, runIndex) {
     chip(fmtSec(ep.duration)),
     ep.instruction_type ? chip(`instr: ${ep.instruction_type}`) : null,
     ...(ep.attributes || []).map((a) => chip(a)),
-    Number.isFinite(policyAvgMs) ? chip(`policy avg: ${policyAvgMs.toFixed(1)} ms`) : null);
+    Number.isFinite(policyAvgMs) ? chip(`policy avg: ${policyAvgMs.toFixed(1)} ms`) : null,
+    Number.isFinite(policyMedianMs) ? chip(`policy med: ${policyMedianMs.toFixed(1)} ms`) : null);
   pane.appendChild(header);
 
   // ---- LANGUAGE INSTRUCTION block (placed above the viewport so it reads

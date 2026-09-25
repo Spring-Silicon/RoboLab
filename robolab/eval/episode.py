@@ -15,6 +15,7 @@ actions inferred per active env and stacked for env.step().
 import logging
 import os
 import re
+import statistics
 import time
 from collections import defaultdict
 
@@ -46,6 +47,7 @@ class TimingStats:
         for name, times in self.times.items():
             d[f"{name}_s"] = round(sum(times), 3)
             d[f"{name}_avg_ms"] = round(sum(times) / len(times) * 1000, 1) if times else 0
+            d[f"{name}_median_ms"] = round(statistics.median(times) * 1000, 1) if times else 0
         d["wall_total_s"] = round(sum(sum(t) for t in self.times.values()), 3)
         d["it_per_sec"] = round(num_steps / d["wall_total_s"], 2) if d["wall_total_s"] > 0 else 0
         return d
