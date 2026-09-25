@@ -6,7 +6,7 @@ import logging
 import numpy as np
 from openpi_client import image_tools, websocket_client_policy
 
-from policies.pi0_family.variants import COMPILED_VARIANTS
+from policies.pi0_family.variants import COMPILED_VARIANTS, VELOCITY_VARIANTS
 from policies.pi0_family.variants import DEFAULT_HORIZONS as _DEFAULT_HORIZONS
 from robolab.eval.base_client import InferenceClient
 
@@ -31,6 +31,7 @@ class Pi0DroidJointposClient(InferenceClient):
     ) -> None:
         super().__init__()
         self._server_chunk_indices: dict[int, int] = {}
+        self._pending_joint_position: np.ndarray | None = None
         if open_loop_horizon is None:
             open_loop_horizon = self.DEFAULT_HORIZONS.get(policy_variant, self.FALLBACK_HORIZON)
         self.open_loop_horizon = int(open_loop_horizon)
@@ -118,6 +119,8 @@ class Pi0DroidJointposClient(InferenceClient):
             "observation/gripper_position": extracted_obs["gripper_position"],
             "prompt": instruction,
         }
+        if self.policy_variant in VELOCITY_VARIANTS:
+            self._pending_joint_position = np.asarray(extracted_obs["joint_position"]).copy()
         if self.policy_variant in COMPILED_VARIANTS:
             env_id = int(extracted_obs["env_id"])
             chunk_index = self._server_chunk_indices.get(env_id, 0)
@@ -133,7 +136,16 @@ class Pi0DroidJointposClient(InferenceClient):
         return self._infer_with_retry(request)
 
     def _unpack_response(self, response: dict) -> np.ndarray:
-        return np.asarray(response["actions"])
+        actions = np.asarray(response["actions"])
+        if self.policy_variant in VELOCITY_VARIANTS:
+            if self._pending_joint_position is None:
+                raise RuntimeError("Velocity policy response has no matching joint observation.")
+            actions = actions.copy()
+            actions[..., :7] = (
+                self._pending_joint_position[:7]
+                + (1.0 / 15.0) * np.cumsum(actions[..., :7], axis=-2)
+            )
+        return actions
 
     # ---- optional hooks -----------------------------------------------
 
@@ -145,9 +157,11 @@ class Pi0DroidJointposClient(InferenceClient):
     def begin_episode(self, episode_idx: int) -> None:
         super().begin_episode(episode_idx)
         self._server_chunk_indices.clear()
+        self._pending_joint_position = None
 
     def reset(self, *, env_id: int | None = None) -> None:
         super().reset(env_id=env_id)
+        self._pending_joint_position = None
         if env_id is None:
             self._server_chunk_indices.clear()
         else:

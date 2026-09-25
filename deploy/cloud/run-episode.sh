@@ -16,14 +16,14 @@ DASHBOARD_IP="${ROBOLAB_DASHBOARD_IP:-$(ip -4 route get 1.1.1.1 | sed -n 's/.* s
 
 COMPILED=0; CONFIG=""; CHECKPOINT=""
 case "$MODEL" in
-  regular|pi05_compiled_regular) VARIANT=pi05_compiled_regular; COMPILED=1 ;;
-  optimized|pi05_compiled_optimized) VARIANT=pi05_compiled_optimized; COMPILED=1 ;;
+  pi05_spring_regular) VARIANT=pi05_compiled_regular; COMPILED=1 ;;
+  pi05_spring_optimized) VARIANT=pi05_compiled_optimized; COMPILED=1 ;;
   pi0) VARIANT=pi0; CONFIG=pi0_droid_jointpos; CHECKPOINT=gs://openpi-assets-simeval/pi0_droid_jointpos ;;
   pi0_fast) VARIANT=pi0_fast; CONFIG=pi0_fast_droid_jointpos; CHECKPOINT=gs://openpi-assets-simeval/pi0_fast_droid_jointpos ;;
   pi05) VARIANT=pi05; CONFIG=pi05_droid_jointpos; CHECKPOINT=gs://openpi-assets-simeval/pi05_droid_jointpos ;;
   paligemma) VARIANT=paligemma; CONFIG=paligemma_binning_droid_jointpos; CHECKPOINT=gs://openpi-assets-simeval/paligemma_binning_droid_jointpos ;;
-  paligemma_fast) VARIANT=paligemma_fast; CONFIG=paligemma_fast_droid_jointpos; CHECKPOINT=gs://openpi-assets-simeval/paligemma_fast_droid_jointpos ;;
-  *) echo "model: pi0, pi0_fast, pi05, paligemma, paligemma_fast, regular, or optimized" >&2; exit 2 ;;
+  paligemma_fast) VARIANT=paligemma_fast; CONFIG=paligemma_fast_droid; CHECKPOINT=gs://openpi-assets-simeval/paligemma_fast_droid ;;
+  *) echo "model: pi0, pi0_fast, pi05, paligemma, paligemma_fast, pi05_spring_regular, or pi05_spring_optimized" >&2; exit 2 ;;
 esac
 
 mkdir -p "$ROOT/logs"

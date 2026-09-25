@@ -22,3 +22,4 @@ DEFAULT_HORIZONS: dict[str, int] = {
 }
 
 COMPILED_VARIANTS = frozenset({"pi05_compiled_regular", "pi05_compiled_optimized"})
+VELOCITY_VARIANTS = frozenset({"paligemma_fast"})
