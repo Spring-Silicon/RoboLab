@@ -25,11 +25,17 @@ case "$MODEL" in
     CONFIG=pi05_droid_jointpos
     CHECKPOINT=gs://openpi-assets-simeval/pi05_droid_jointpos
     ;;
+  pi05_base)
+    MODE=l4
+    VARIANT=pi05_base
+    CONFIG=pi05_droid_jointpos
+    CHECKPOINT=gs://openpi-assets/checkpoints/pi05_base
+    ;;
   pi0|pi0_fast|paligemma|paligemma_fast)
     echo "$MODEL is not provisioned on the L4 or B580." >&2
     exit 3
     ;;
-  *) echo "model: pi05, pi05_spring_regular, or pi05_spring_optimized" >&2; exit 2 ;;
+  *) echo "model: pi05_base, pi05, pi05_spring_regular, or pi05_spring_optimized" >&2; exit 2 ;;
 esac
 
 mkdir -p "$ROOT/logs"

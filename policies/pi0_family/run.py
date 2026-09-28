@@ -3,7 +3,7 @@
 
 """Evaluate the Pi0 family of policy backends across registered tasks.
 
-Covers pi0, pi0_fast, pi05, pi05_compiled_regular,
+Covers pi0, pi0_fast, pi05, pi05_base, pi05_compiled_regular,
 pi05_compiled_optimized, paligemma, and paligemma_fast — all served by
 :class:`Pi0DroidJointposClient`, with per-variant defaults selected via ``--policy``.
 """

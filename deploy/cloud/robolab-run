@@ -7,7 +7,7 @@ usage() {
   cat <<EOF
 Usage: robolab-run [options] MODEL TASK
 
-Models: pi05 (NVIDIA L4), pi05_spring_regular, pi05_spring_optimized
+Models: pi05_base (NVIDIA L4), pi05 (DROID, NVIDIA L4), pi05_spring_regular, pi05_spring_optimized
 Unavailable: pi0, pi0_fast, paligemma, paligemma_fast
 Options:
   --host HOST       GPU host (default: $DEFAULT_HOST)
@@ -16,7 +16,7 @@ Options:
   -h, --help        Show this help
 
 Example:
-  robolab-run pi05 MustardInRightBinTask
+  robolab-run pi05_base MustardInRightBinTask
 EOF
 }
 while (($#)); do

@@ -1,9 +1,9 @@
 # Pi0 Family (OpenPI)
 
-The Pi0 family — `pi0`, `pi0_fast`, `pi05`, `pi05_compiled_regular`, `pi05_compiled_optimized`, `paligemma`, and `paligemma_fast` — is served by a single client, `Pi0DroidJointposClient`, over a WebSocket-based OpenPI policy server. The variant is selected at runtime via `--policy`; each variant supplies its own per-variant defaults inside the client.
+The Pi0 family — `pi0`, `pi0_fast`, `pi05`, `pi05_base`, `pi05_compiled_regular`, `pi05_compiled_optimized`, `paligemma`, and `paligemma_fast` — is served by a single client, `Pi0DroidJointposClient`, over a WebSocket-based OpenPI policy server. The variant is selected at runtime via `--policy`; each variant supplies its own per-variant defaults inside the client.
 
 See the [policies README](../README.md) for the shared client architecture and common CLI options.
-For pi0-family variants, pass `--policy {pi0,pi0_fast,pi05,pi05_compiled_regular,pi05_compiled_optimized,paligemma,paligemma_fast}`.
+For pi0-family variants, pass `--policy {pi0,pi0_fast,pi05,pi05_base,pi05_compiled_regular,pi05_compiled_optimized,paligemma,paligemma_fast}`.
 
 ## Install the server
 
@@ -24,6 +24,13 @@ Open a separate terminal and launch the server. We set `XLA_PYTHON_CLIENT_MEM_FR
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.5 uv run scripts/serve_policy.py policy:checkpoint \
     --policy.config=pi05_droid_jointpos \
     --policy.dir=gs://openpi-assets-simeval/pi05_droid_jointpos
+```
+
+**Pi05 base weights with DROID joint-position transforms:**
+```bash
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.5 uv run scripts/serve_policy.py policy:checkpoint \
+    --policy.config=pi05_droid_jointpos \
+    --policy.dir=gs://openpi-assets/checkpoints/pi05_base
 ```
 
 **Pi0-fast:**
