@@ -17,11 +17,11 @@ On Cleveland, double-click **Run RoboLab** or use:
 
 ```bash
 robolab-run --help
-robolab-run pi05_spring_optimized AnimalsInBinTask
+robolab-run pi05 MustardInRightBinTask
 ```
 
-Only `pi05_spring_regular` and `pi05_spring_optimized` are enabled. Other OpenPI models fail before EC2 launch until a validated B580 backend exists.
-Cleveland's real-robot Franka/DROID workload has priority. If it is active, `robolab-run` exits without stopping or changing it; run the cloud episode after the real-robot workload is intentionally released. Spring policy gateways use local port `8100`, leaving the DROID runtime on `8000`.
+`pi05` runs the standard OpenPI Pi05 policy beside Isaac Sim on the NVIDIA L4. `pi05_spring_regular` and `pi05_spring_optimized` run their compiled gateways on Cleveland's Intel B580. Pi0, FAST, and PaliGemma variants remain unavailable until a validated backend is provisioned.
+Cleveland's real-robot Franka/DROID workload has priority over the Spring compiled gateways. If it is active, those variants exit without stopping or changing it. The L4 `pi05` path is independent and may run while the real-robot workload is active. Spring policy gateways use local port `8100`, leaving the DROID runtime on `8000`.
 
 Double-click **RoboLab Dashboard** to view results.
 
