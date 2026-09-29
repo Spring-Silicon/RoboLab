@@ -40,15 +40,27 @@ esac
 
 mkdir -p "$ROOT/logs"
 LOG="$ROOT/logs/$OUTPUT.log"
+SIM_LOG="$ROOT/logs/$OUTPUT.simulator.log"
 USE_COLOR=0
 [[ -t 1 ]] && USE_COLOR=1
 exec > >(tee >(sed -u $'s/\033\\[[0-9;]*m//g' >> "$LOG")) 2>&1
 format_simulator_output() {
-  local line
+  local line lower startup=1 hidden=0
   while IFS= read -r line || [[ -n "$line" ]]; do
-    case "$line" in
-      *"[Warning]"*|*"Warning:"*|Warp\ CUDA\ error*|cat:\ *cpufreq*)
-        if [[ "$USE_COLOR" == 1 ]]; then
+    if [[ "$line" == *"[RoboLab] Running "* ]]; then
+      startup=0
+      if (( hidden > 0 )); then
+        printf '[INFO] Hidden %d startup warnings; full output: %s\n' "$hidden" "$SIM_LOG"
+        hidden=0
+      fi
+    fi
+    lower="${line,,}"
+    case "$lower" in
+      *"[error]"*|*"[fatal]"*|*"cuda error"*|*"traceback"*) printf '%s\n' "$line" ;;
+      *"[warning]"*|*"[warn]"*|*"warning:"*|cat:\ *cpufreq*)
+        if (( startup )); then
+          hidden=$((hidden + 1))
+        elif [[ "$USE_COLOR" == 1 ]]; then
           printf '\033[1;33m[WARNING] %s\033[0m\n' "$line"
         else
           printf '[WARNING] %s\n' "$line"
@@ -57,6 +69,9 @@ format_simulator_output() {
       *) printf '%s\n' "$line" ;;
     esac
   done
+  if (( hidden > 0 )); then
+    printf '[INFO] Hidden %d startup warnings; full output: %s\n' "$hidden" "$SIM_LOG"
+  fi
 }
 exec 9>"$ROOT/run.lock"
 if ! flock -n 9; then
@@ -112,8 +127,9 @@ else
   printf '[2/4] Starting Pi05 on the NVIDIA L4 (first checkpoint load can take several minutes)...\n'
 fi
 
+printf 'Full simulator log: %s (startup warnings hidden in the terminal)\n' "$SIM_LOG"
 ssh -i "$KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$USER_NAME@$HOST" \
-  bash -s -- "$IMAGE" "$OPENPI_IMAGE" "$MODE" "$VARIANT" "$TASK" "$OUTPUT" "$CONFIG" "$CHECKPOINT" 2>&1 <<'REMOTE' | format_simulator_output
+  bash -s -- "$IMAGE" "$OPENPI_IMAGE" "$MODE" "$VARIANT" "$TASK" "$OUTPUT" "$CONFIG" "$CHECKPOINT" 2>&1 <<'REMOTE' | tee "$SIM_LOG" | format_simulator_output
 set -euo pipefail
 IMAGE="$1"; OPENPI_IMAGE="$2"; MODE="$3"; VARIANT="$4"; TASK="$5"; OUTPUT="$6"; CONFIG="$7"; CHECKPOINT="$8"
 POLICY_PORT=18000

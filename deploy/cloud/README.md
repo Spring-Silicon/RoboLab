@@ -17,11 +17,24 @@ On Cleveland, double-click **Run RoboLab** or use:
 
 ```bash
 robolab-run --help
+robolab-run pi05_spring_optimized MustardInRightBinTask
 robolab-run pi05_base MustardInRightBinTask
 ```
 
+**Run RoboLab** prefills `pi05_spring_optimized MustardInRightBinTask`. The mustard
+task has a 30-second simulated episode limit; simulator startup takes additional
+wall-clock time.
+
 `pi05_base` runs the OpenPI Pi05 base checkpoint with DROID joint-position transforms beside Isaac Sim on the NVIDIA L4. `pi05` uses the DROID-post-trained Pi05 checkpoint on the L4. `pi05_spring_regular` and `pi05_spring_optimized` run their compiled gateways on Cleveland's Intel B580. Pi0, FAST, and PaliGemma variants remain unavailable until a validated backend is provisioned.
 Cleveland's real-robot Franka/DROID workload has priority over the Spring compiled gateways. If it is active, those variants exit without stopping or changing it. The L4 `pi05_base` and `pi05` paths are independent and may run while the real-robot workload is active. Spring policy gateways use local port `8100`, leaving the DROID runtime on `8000`.
+
+Startup warnings are hidden **only in the terminal**, until RoboLab starts its
+first episode. Errors, CUDA errors, tracebacks, and warnings during the episode
+remain visible. A summary reports the number hidden. The complete, unfiltered
+simulator stream is saved incrementally to
+`~/.local/share/robolab/runner/logs/<output-name>.simulator.log`; the terminal log
+remains `<output-name>.log`. A failed simulator/SSH command still returns its
+nonzero exit status.
 
 Double-click **RoboLab Dashboard** to view results.
 
