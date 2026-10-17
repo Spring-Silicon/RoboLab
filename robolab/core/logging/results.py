@@ -677,9 +677,15 @@ def append_episode_to_jsonl(file_path: str, episode: dict):
 
 
 def load_jsonl(file_path: str) -> list[dict]:
-    """Load a JSONL file, returning a list of dicts. Skips blank/malformed lines."""
+    """Load a JSONL file, returning a list of dicts. Skips blank/malformed lines.
+
+    A shared lock waits for appends that hold the exclusive lock, so a reader never sees half a line.
+    """
+    import fcntl
+
     results = []
     with open(file_path, "r") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_SH)
         for i, line in enumerate(f, 1):
             line = line.strip()
             if not line:
