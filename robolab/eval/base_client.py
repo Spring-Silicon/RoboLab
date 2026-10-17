@@ -416,20 +416,22 @@ class InferenceClient(ABC):
         return responses
 
     def _open_query_connections(self, n: int) -> None:
-        """Make sure that ``n`` connections exist, each opened on its own worker thread."""
-        new_threads = [
-            ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"policy-query-{index}")
-            for index in range(len(self._query_threads), n)
-        ]
-        futures = [thread.submit(self._open_connection) for thread in new_threads]
-        wait(futures)
-        for thread, future in zip(new_threads, futures, strict=True):
+        """Make sure that ``n`` connections exist, each opened on its own worker thread.
+
+        Opens them one after another: some servers (``multiprocessing.connection``
+        listeners) authenticate new connections one at a time and can stall on
+        simultaneous handshakes.
+        """
+        while len(self._query_threads) < n:
+            thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"policy-query-{len(self._query_threads)}")
+            try:
+                connection = thread.submit(self._open_connection).result()
+            except BaseException:
+                thread.shutdown(wait=True)
+                self._close_query_connections(raise_errors=False)
+                raise
             self._query_threads.append(thread)
-            self._query_connections.append(future.result() if future.exception() is None else None)
-        errors = [future.exception() for future in futures if future.exception() is not None]
-        if errors:
-            self._close_query_connections(raise_errors=False)
-            raise errors[0]
+            self._query_connections.append(connection)
 
     def _close_query_connections(self, *, raise_errors: bool = True) -> None:
         """Close every connection on its own thread, then stop the threads.
@@ -442,7 +444,6 @@ class InferenceClient(ABC):
         closes = [
             thread.submit(self._close_connection, connection)
             for thread, connection in zip(threads, connections, strict=True)
-            if connection is not None
         ]
         for thread in threads:
             thread.shutdown(wait=True)
