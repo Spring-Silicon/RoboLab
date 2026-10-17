@@ -5,9 +5,14 @@
 # droid_plus/eval/base_client.py — keep both in sync when editing.
 
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import numpy as np
+
+# How ``infer_batch`` sends the policy queries of the envs that need a new
+# action chunk at the same control step (see ``InferenceClient.configure_queries``).
+QUERY_MODES = ("auto", "serial", "concurrent", "batch")
 
 
 class InferenceClient(ABC):
@@ -36,6 +41,20 @@ class InferenceClient(ABC):
     # Subclasses override to match their server's chunk length.
     # horizon=1 is correct for single-action servers.
     open_loop_horizon: int = 1
+    # Clients whose transport can open independent connections set this and
+    # implement ``_open_connection`` / ``_query_server_on``.
+    supports_concurrent_queries: bool = False
+    # Set only when the server returns the same chunk for the same request,
+    # independent of the order in which it gets requests (no shared RNG or
+    # per-connection state). Then ``"auto"`` sends queries concurrently.
+    order_independent_server: bool = False
+    # Clients whose server accepts several observations in one request set
+    # this and implement ``_query_server_batch``.
+    supports_batched_queries: bool = False
+
+    # Defaults for ``configure_queries``.
+    query_mode: str = "auto"
+    max_concurrent_queries: int = 16
 
     def __init__(self) -> None:
         # Per-env chunking state. Subclasses may ignore and manage state however
@@ -44,6 +63,40 @@ class InferenceClient(ABC):
         self._counters: dict[int, int] = {}
         # Set by begin_episode(); see below.
         self._eval_episode_idx: int = 0
+        # Extra connections and worker threads for concurrent queries, opened on first use.
+        self._query_connections: list[Any] = []
+        self._query_executor: ThreadPoolExecutor | None = None
+
+    def configure_queries(self, *, mode: str | None = None, max_workers: int | None = None) -> None:
+        """Select how ``infer_batch`` sends the queries of several envs at one control step.
+
+        - ``"auto"`` (default): ``"concurrent"`` for clients with
+          ``order_independent_server``, else ``"serial"``. Actions are then the
+          same as with the serial loop.
+        - ``"serial"``: the historical loop over :meth:`infer`, one env at a time.
+        - ``"concurrent"``: one request per env, sent at the same time over
+          separate connections (at most ``max_workers``). Clients without
+          ``supports_concurrent_queries`` use ``"serial"``. A server with a
+          shared RNG (pi0, GR00T, Cosmos) then gives other noise samples to
+          each env than the serial loop.
+        - ``"batch"``: one request for all envs, for clients with
+          ``supports_batched_queries``; other clients use ``"concurrent"``.
+          The server computes all envs in one forward pass, so its outputs can
+          differ from per-env requests (numerics, noise sampling).
+
+        Each env gets the same observation and request in every mode, and the
+        same action chunk if the server returns the same chunk for the same request.
+        """
+        if mode is not None:
+            if mode not in QUERY_MODES:
+                raise ValueError(f"query mode must be one of {QUERY_MODES}, got {mode!r}")
+            self.query_mode = mode
+        if max_workers is not None:
+            if max_workers < 1:
+                raise ValueError("max_workers must be >= 1")
+            if max_workers != self.max_concurrent_queries:
+                self._close_query_connections()
+            self.max_concurrent_queries = max_workers
 
     def begin_episode(self, episode_idx: int) -> None:
         """Notify the client that a new episode is starting.
@@ -92,16 +145,38 @@ class InferenceClient(ABC):
         """Infer actions for several envs in one call.
 
         Returns ``{env_id: {"action": ..., "viz": ...}}`` with one entry per
-        requested env. Default implementation is a serial loop over
-        :meth:`infer` — behavior-identical to the historical per-env eval
-        loop, so every existing client works unchanged. Clients whose server
-        supports batched payloads can override this to issue one request for
-        all envs needing a replan.
+        requested env. When two or more envs need a new chunk and the query
+        mode (see :meth:`configure_queries`) allows it, their queries go out
+        together: one batched request, or concurrent per-env requests. Every
+        env still gets the same extraction, request, chunk and action as with
+        the serial loop over :meth:`infer`; otherwise this is that loop.
         """
-        return {
-            env_id: self.infer(obs, instruction, env_id=env_id)
+        refresh_ids = [env_id for env_id in env_ids if self._needs_refresh(env_id)]
+        if len(refresh_ids) < 2 or self._effective_query_mode() == "serial":
+            return {
+                env_id: self.infer(obs, instruction, env_id=env_id)
+                for env_id in env_ids
+            }
+
+        # Same per-env work as ``infer``, split so that all queries are sent at once.
+        skip_extraction = self._has_unrendered_groups(obs)
+        refresh = set(refresh_ids)
+        extracted = {
+            env_id: self._extract_observation(obs, env_id=env_id)
             for env_id in env_ids
+            if env_id in refresh or not skip_extraction
         }
+        requests = [self._pack_request(extracted[env_id], instruction) for env_id in refresh_ids]
+        responses = self._query_server_many(requests)
+        for env_id, response in zip(refresh_ids, responses, strict=True):
+            self._set_chunk(env_id, self._postprocess_chunk(self._unpack_response(response)))
+
+        rets = {}
+        for env_id in env_ids:
+            action = self._next_action(env_id)
+            viz = self._build_visualization(extracted[env_id]) if env_id in extracted else None
+            rets[env_id] = {"action": action, "viz": viz}
+        return rets
 
     def reset(self, *, env_id: int | None = None) -> None:
         """Clear per-episode state. ``env_id=None`` resets all envs.
@@ -117,8 +192,11 @@ class InferenceClient(ABC):
             self._counters.pop(env_id, None)
 
     def close(self) -> None:
-        """Release transport resources. Default: no-op."""
-        return None
+        """Release transport resources. Default: close the concurrent-query connections.
+
+        Subclasses that override this should call ``super().close()``.
+        """
+        self._close_query_connections()
 
     def visualize(self, obs: Any, *, env_id: int = 0) -> np.ndarray | None:
         """Public convenience wrapper for callers that want the viz image."""
@@ -163,6 +241,40 @@ class InferenceClient(ABC):
     @abstractmethod
     def _unpack_response(self, response: Any) -> np.ndarray:
         """Return a ``(horizon, action_dim)`` numpy array."""
+
+    # ------------------------------------------------------------------
+    # Multi-env query hooks (optional; see configure_queries)
+    # ------------------------------------------------------------------
+
+    def _open_connection(self) -> Any:
+        """Open one more server connection for concurrent queries.
+
+        Required with ``supports_concurrent_queries``. Called from the main
+        thread; each connection is then used by one worker thread at a time.
+        """
+        raise NotImplementedError
+
+    def _query_server_on(self, connection: Any, request: Any) -> Any:
+        """Like ``_query_server``, over a connection from ``_open_connection``.
+
+        Required with ``supports_concurrent_queries``. Runs on a worker thread:
+        touch only ``connection`` and ``request``, no other client state.
+        """
+        raise NotImplementedError
+
+    def _close_connection(self, connection: Any) -> None:
+        """Close a connection from ``_open_connection``. Default: its ``close()``, if any."""
+        close = getattr(connection, "close", None)
+        if close is not None:
+            close()
+
+    def _query_server_batch(self, requests: list[Any]) -> list[Any]:
+        """Send several ``_pack_request`` requests in one server call.
+
+        Required with ``supports_batched_queries``. Return one response per
+        request, in request order, each accepted by ``_unpack_response``.
+        """
+        raise NotImplementedError
 
     # ------------------------------------------------------------------
     # Observation helpers (generic; no backend or camera knowledge)
@@ -250,3 +362,59 @@ class InferenceClient(ABC):
         action = self._chunks[env_id][self._counters[env_id]]
         self._counters[env_id] += 1
         return action
+
+    # ------------------------------------------------------------------
+    # Multi-env query internals
+    # ------------------------------------------------------------------
+
+    def _effective_query_mode(self) -> str:
+        if type(self).infer is not InferenceClient.infer:
+            # A custom ``infer`` defines its own per-env flow; keep the loop over it.
+            return "serial"
+        mode = self.query_mode
+        if mode == "auto":
+            mode = "concurrent" if self.order_independent_server else "serial"
+        if mode == "batch" and not self.supports_batched_queries:
+            mode = "concurrent"
+        if mode == "concurrent" and (not self.supports_concurrent_queries or self.max_concurrent_queries < 2):
+            mode = "serial"
+        return mode
+
+    def _query_server_many(self, requests: list[Any]) -> list[Any]:
+        """Responses for ``requests``, in order, sent as one batch or concurrently."""
+        if self._effective_query_mode() == "batch":
+            responses = list(self._query_server_batch(requests))
+            if len(responses) != len(requests):
+                raise RuntimeError(f"batched query returned {len(responses)} responses for {len(requests)} requests")
+            return responses
+
+        # Request i goes to connection i % n: a fixed assignment, results stay in request order.
+        n = min(len(requests), self.max_concurrent_queries)
+        while len(self._query_connections) < n:
+            self._query_connections.append(self._open_connection())
+        if self._query_executor is None:
+            self._query_executor = ThreadPoolExecutor(
+                max_workers=self.max_concurrent_queries, thread_name_prefix="policy-query"
+            )
+        futures = [
+            self._query_executor.submit(
+                lambda conn, reqs: [self._query_server_on(conn, req) for req in reqs],
+                self._query_connections[worker],
+                requests[worker::n],
+            )
+            for worker in range(n)
+        ]
+        per_worker = [future.result() for future in futures]
+        responses = [None] * len(requests)
+        for worker, worker_responses in enumerate(per_worker):
+            responses[worker::n] = worker_responses
+        return responses
+
+    def _close_query_connections(self) -> None:
+        executor = getattr(self, "_query_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=True)
+            self._query_executor = None
+        connections = getattr(self, "_query_connections", [])
+        while connections:
+            self._close_connection(connections.pop())
