@@ -12,7 +12,8 @@ task folder in BASE_DIR, the script compares:
     must have the same shape and give mean and max absolute pixel differences, because
     RTX images are not bitwise repeatable between processes,
   * the *.mp4 videos: the same names, frame counts (more than 0) and frame shapes;
-    decoded frames give mean and max absolute pixel differences (needs OpenCV),
+    decoded frames give mean and max absolute pixel differences, the count of bit-identical
+    frames, and the difference against a one-frame shift (alignment check; needs OpenCV),
   * env_cfg.json (without output paths and Python object addresses).
 Exit status is 1 if a non-image value, an image shape, or a video frame count or shape
 differs, a video has no frames, or a file is missing or extra.
@@ -119,12 +120,18 @@ def compare(base_dir: Path, cand_dir: Path) -> dict:
 
 
 def compare_video(base: Path, cand: Path) -> dict:
-    """Frame counts and shape (must match, non-empty) and mean / max absolute pixel difference of the frames."""
+    """Frame counts and shape (must match, non-empty), mean / max absolute pixel difference of the frames,
+    the number of bit-identical frames, the worst per-frame mean difference, and the mean difference to the
+    neighbouring frame (base frame i against candidate frames i-1 and i+1): aligned frames give a much
+    smaller difference than the one-frame shift."""
     import cv2
 
     cap_b, cap_c = cv2.VideoCapture(str(base)), cv2.VideoCapture(str(cand))
     frames_b = frames_c = 0
     total, pixels, peak = 0.0, 0, 0
+    identical, worst_frame = 0, 0.0
+    shifted_total, shifted_pixels = 0.0, 0
+    prev_b = prev_c = None
     shape_equal = True
     try:
         while True:
@@ -136,11 +143,20 @@ def compare_video(base: Path, cand: Path) -> dict:
                 break
             if img_b.shape != img_c.shape:
                 shape_equal = False
+                prev_b = prev_c = None
                 continue
             diff = cv2.absdiff(img_b, img_c)
-            total += float(diff.sum(dtype=np.float64))
+            frame_sum = float(diff.sum(dtype=np.float64))
+            total += frame_sum
             pixels += diff.size
             peak = max(peak, int(diff.max()))
+            identical += frame_sum == 0
+            worst_frame = max(worst_frame, frame_sum / diff.size)
+            if prev_b is not None and prev_b.shape == img_b.shape:
+                for x, y in ((img_b, prev_c), (prev_b, img_c)):
+                    shifted_total += float(cv2.absdiff(x, y).sum(dtype=np.float64))
+                    shifted_pixels += diff.size
+            prev_b, prev_c = img_b, img_c
         while ok_b:
             ok_b, _ = cap_b.read()
             frames_b += ok_b
@@ -151,7 +167,9 @@ def compare_video(base: Path, cand: Path) -> dict:
         cap_b.release()
         cap_c.release()
     return {"frames": [frames_b, frames_c], "shape_equal": shape_equal,
-            "mean_abs": total / max(pixels, 1), "max_abs": peak}
+            "mean_abs": total / max(pixels, 1), "max_abs": peak,
+            "identical_frames": identical, "worst_frame_mean_abs": worst_frame,
+            "shift1_mean_abs": shifted_total / max(shifted_pixels, 1)}
 
 
 def _cfg(path: Path) -> object:
@@ -177,7 +195,10 @@ def main() -> None:
     args.output.write_text(json.dumps(report, indent=1))
     images = {task: {run: {k: round(v["mean_abs"], 3) for k, v in r["images"].items()}
                      for run, r in t["runs"].items()} for task, t in report["tasks"].items()}
-    videos = {task: {name: {"frames": v["frames"], "mean_abs": round(v["mean_abs"], 3), "max_abs": v["max_abs"]}
+    videos = {task: {name: {"frames": v["frames"], "mean_abs": round(v["mean_abs"], 3), "max_abs": v["max_abs"],
+                            "identical_frames": v["identical_frames"],
+                            "worst_frame_mean_abs": round(v["worst_frame_mean_abs"], 3),
+                            "shift1_mean_abs": round(v["shift1_mean_abs"], 3)}
                      for name, v in t["videos"].items()} for task, t in report["tasks"].items()}
     print(json.dumps({"passed": report["passed"], "row_diffs": len(report["result_row_diffs"]),
                       "image_mean_abs": images, "videos": videos}, indent=1))
