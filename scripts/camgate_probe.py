@@ -104,9 +104,24 @@ def readable_groups(enabled):
     return tuple(g for g, names in group_sensors.items() if all(n in enabled for n in names))
 
 
+def readable(cam):
+    try:
+        cam.data.output
+        return True
+    except RuntimeError:
+        return False
+
+
 def time_config(enabled, read, steps):
     set_enabled(enabled)
     groups = readable_groups(enabled) if read else ()
+    # Render without reads until the enabled cameras deliver frames (render products enabled again can lag).
+    for _ in range(5):
+        step(render=True, camera_observations=())
+    for _ in range(10):
+        if all(readable(cameras[n]) for n in enabled):
+            break
+        step(render=True, camera_observations=())
     for _ in range(5):
         step(render=True, camera_observations=groups)
     render_times.clear()
@@ -126,9 +141,31 @@ def time_config(enabled, read, steps):
     }
 
 
+def delivery_lag(name, max_renders=10):
+    """Renders after enabling the render product of `name` again until its annotators deliver a frame."""
+    set_enabled(set(names) - {name})
+    for _ in range(3):
+        step(render=True, camera_observations=())
+    set_enabled(set(names))
+    for renders in range(1, max_renders + 1):
+        step(render=True, camera_observations=())
+        if readable(cameras[name]):
+            return renders
+    return None
+
+
 env.reset()
 env.reset()
 names = list(cameras)
+lags = {n: [delivery_lag(n) for _ in range(3)] for n in names}
+result["delivery_lag_renders"] = lags
+print("LAGS", json.dumps(lags), flush=True)
+if any(lag is None for v in lags.values() for lag in v):
+    raise RuntimeError(f"A render product delivered no frame within 10 renders after enabling: {lags}")
+# Enable the gated cameras this many steps before the consumed step (that step renders too).
+gate_warmup = max(lag for v in lags.values() for lag in v) - 1
+result["gate_warmup_steps"] = gate_warmup
+set_enabled(set(names))
 configs = [("all", set(names)), ("none", set())]
 configs += [(f"only_{n}", {n}) for n in names]
 configs += [(f"all_but_{n}", set(names) - {n}) for n in names]
@@ -170,15 +207,16 @@ def episode(gated):
     imgs, joints, raised = [], [], []
     for t in range(a.fresh_steps):
         consumed = t % 8 == 7
+        enabled_now = t % 8 >= 7 - gate_warmup
         if gated:
-            set_enabled(set(names) if consumed else set(names) - gated_names)
+            set_enabled(set(names) if enabled_now else set(names) - gated_names)
             groups = tuple(group_sensors) if consumed else readable_groups(set(names) - gated_names)
         else:
             groups = tuple(group_sensors)
         obs, *_ = step(render=True, camera_observations=groups)
         imgs.append(images(obs, groups))
         joints.append(env.scene["robot"].data.joint_pos[0].cpu().numpy().copy())
-        if gated and not consumed:
+        if gated and not enabled_now:
             try:
                 env.scene.sensors[next(iter(gated_names))].data.output["rgb"]
                 raised.append(False)
