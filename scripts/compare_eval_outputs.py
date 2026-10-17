@@ -10,14 +10,17 @@ task folder in BASE_DIR, the script compares:
     attributes must be bit-identical; camera images (uint8 arrays with 3 or more
     dimensions) give mean and max absolute pixel differences, because RTX images are not
     bitwise repeatable between processes,
-  * the names of the *.mp4 videos,
-  * env_cfg.json (without output paths).
-Exit status is 1 if a non-image value differs or a file is missing or extra.
+  * the *.mp4 videos: the same names and frame counts; decoded frames give mean and max
+    absolute pixel differences (needs OpenCV),
+  * env_cfg.json (without output paths and Python object addresses).
+Exit status is 1 if a non-image value or a video frame count differs, or a file is
+missing or extra.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -95,13 +98,16 @@ def compare(base_dir: Path, cand_dir: Path) -> dict:
         result["extra"] = sorted(names_c - names_b)
         for name in sorted(names_b & names_c):
             result["runs"][name] = compare_hdf5(tb / name, tc / name)
-        result["videos_equal"] = {p.name for p in tb.glob("*.mp4")} == {p.name for p in tc.glob("*.mp4")}
+        videos_b = {p.name for p in tb.glob("*.mp4")}
+        result["videos_equal"] = videos_b == {p.name for p in tc.glob("*.mp4")}
+        result["videos"] = {name: compare_video(tb / name, tc / name) for name in sorted(videos_b) if (tc / name).is_file()}
         cfg_b, cfg_c = tb / "env_cfg.json", tc / "env_cfg.json"
         result["env_cfg_equal"] = cfg_c.is_file() and _cfg(cfg_b) == _cfg(cfg_c)
         result["success"] = {str(k[1]): rows_b[k].get("success") for k in rows_b if k[0] == task}
         tasks[task] = result
     passed = not row_diffs and not dup_b and not dup_c and all(
         not t["missing"] and not t["extra"] and t["videos_equal"] and t["env_cfg_equal"]
+        and all(v["frames"][0] == v["frames"][1] for v in t["videos"].values())
         and all(not r["non_image_mismatches"] for r in t["runs"].values())
         for t in tasks.values()
     )
@@ -110,13 +116,43 @@ def compare(base_dir: Path, cand_dir: Path) -> dict:
             "result_row_diffs": row_diffs, "tasks": tasks}
 
 
+def compare_video(base: Path, cand: Path) -> dict:
+    """Frame counts (must match) and mean / max absolute pixel difference of the decoded frames."""
+    import cv2
+
+    cap_b, cap_c = cv2.VideoCapture(str(base)), cv2.VideoCapture(str(cand))
+    frames_b = frames_c = 0
+    total, pixels, peak = 0.0, 0, 0
+    while True:
+        ok_b, img_b = cap_b.read()
+        ok_c, img_c = cap_c.read()
+        frames_b += ok_b
+        frames_c += ok_c
+        if not (ok_b and ok_c):
+            break
+        diff = cv2.absdiff(img_b, img_c)
+        total += float(diff.sum(dtype=np.float64))
+        pixels += diff.size
+        peak = max(peak, int(diff.max()))
+    while ok_b:
+        ok_b, _ = cap_b.read()
+        frames_b += ok_b
+    while ok_c:
+        ok_c, _ = cap_c.read()
+        frames_c += ok_c
+    return {"frames": [frames_b, frames_c], "mean_abs": total / max(pixels, 1), "max_abs": peak}
+
+
+
 def _cfg(path: Path) -> object:
-    """env_cfg.json without values that hold the output path."""
+    """env_cfg.json without values that hold the output path or a Python object address."""
     def strip(value):
         if isinstance(value, dict):
             return {k: strip(v) for k, v in value.items() if k not in ("dataset_export_dir_path", "output_dir")}
         if isinstance(value, list):
             return [strip(v) for v in value]
+        if isinstance(value, str):
+            return re.sub(r" at 0x[0-9a-f]+", " at 0x", value)
         return value
     return strip(json.loads(path.read_text()))
 
@@ -129,10 +165,12 @@ def main() -> None:
     args = parser.parse_args()
     report = compare(args.base, args.candidate)
     args.output.write_text(json.dumps(report, indent=1))
-    summary = {task: {run: {k: round(v["mean_abs"], 3) for k, v in r["images"].items()}
-                      for run, r in t["runs"].items()} for task, t in report["tasks"].items()}
+    images = {task: {run: {k: round(v["mean_abs"], 3) for k, v in r["images"].items()}
+                     for run, r in t["runs"].items()} for task, t in report["tasks"].items()}
+    videos = {task: {name: {"frames": v["frames"], "mean_abs": round(v["mean_abs"], 3), "max_abs": v["max_abs"]}
+                     for name, v in t["videos"].items()} for task, t in report["tasks"].items()}
     print(json.dumps({"passed": report["passed"], "row_diffs": len(report["result_row_diffs"]),
-                      "image_mean_abs": summary}, indent=1))
+                      "image_mean_abs": images, "videos": videos}, indent=1))
     sys.exit(0 if report["passed"] else 1)
 
 
