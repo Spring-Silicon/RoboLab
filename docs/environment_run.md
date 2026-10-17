@@ -388,6 +388,7 @@ The built-in `policies/pi0_family/run.py` supports the full set of evaluation fe
 | `--randomize-background` | Sample a random non-default background per task at registration time. The chosen texture is recorded in each task's `env_cfg.json`. See [Backgrounds — Per-Run Random Background per Task](background.md#per-run-random-background-per-task). | `False` |
 | `--background-seed N` | Seed for reproducible per-task background sampling. Used with `--randomize-background`. | `None` |
 | `--limit-cpu-threads N` | Size of Kit's carb.tasking and TBB worker pools (Isaac Sim `limit_cpu_threads`). See [Running Many Evaluations per Machine](#running-many-evaluations-per-machine). | `4` |
+| `--task-queue` | Several processes started with the same task list and the same `--output-folder-name` share the tasks: each process claims the next free task with a file lock, so every process pays Kit startup once. See [Sharing a Task List Between Processes](#sharing-a-task-list-between-processes). | `False` |
 | `--headless` | Run without live display window. **Recommended for multi-task runs** — see [GPU VRAM leak in non-headless mode](debug.md#gpu-vram-leak-in-non-headless-mode-across-environment-reloads) | `False` |
 | `--enable-verbose` | Verbose output | `False` |
 | `--enable-debug` | Debug output | `False` |
@@ -466,7 +467,7 @@ Horizon 24 without warm-up differs by 1.10 / 3.29 / 1.56–1.60. Judge whether t
 
 ### Running Many Evaluations per Machine
 
-One evaluation process drives a single scene from one main Python thread and keeps the GPU busy only part of each step, so a machine evaluates fastest with several processes per GPU (for example one process per task, each with its own `--output-folder-name`). With `--device cpu` (CPU PhysX), RTX rendering still runs on the GPU.
+One evaluation process drives a single scene from one main Python thread and keeps the GPU busy only part of each step, so a machine evaluates fastest with several processes per GPU. With `--device cpu` (CPU PhysX), RTX rendering still runs on the GPU.
 
 - Keep `--limit-cpu-threads` at 4 and set `OMP_NUM_THREADS=1`. Isaac Sim's default 32-thread pools spin about four extra cores per process without shortening a step.
 - Give each task's episodes to one process with `--num_envs` (for example 10 envs for 10 episodes). Ten envs in one process render with about a third less GPU time per env-step than ten single-env processes and use about 0.9 GiB of GPU memory per env instead of 4.0 GiB per process.
@@ -482,6 +483,27 @@ Measured on one L40S (45 GiB usable) with CPU PhysX, `MustardInRightBinTask`, 45
 | 4 × 10 envs | 1342 | 5.8 | 92% | 37.0 GiB |
 
 The original tree evaluated 36 such episodes per hour with one process on the same GPU. A real policy adds its inference latency to every queried step.
+
+### Sharing a Task List Between Processes
+
+One process already keeps Kit alive for all of its tasks: it starts Isaac Sim once, then creates and closes one environment per task. Starting a new process per task costs Kit startup and task registration again for each task.
+
+To spread a task list over several processes without splitting it by hand, start every process with the same arguments and add `--task-queue`:
+
+```bash
+for i in 1 2 3 4; do
+  OMP_NUM_THREADS=1 python policies/pi0_family/run.py --task-queue --output-folder-name my_eval &
+done
+wait
+```
+
+- `--task-queue` is off by default. Without it, a process runs every task in its list.
+- `--output-folder-name` is required with `--task-queue`. All processes must use the same folder and the same task arguments.
+- Before a process starts a task, it takes an exclusive file lock on `output/<folder>/.task_queue/<task>.lock`. When another process holds the lock, it skips the task. A process keeps its locks until it exits.
+- The locks are `flock` locks. Use a local file system for the output folder. Locks on network file systems can fail to exclude other hosts.
+- When a process crashes, the operating system releases its locks. Start a process again with the same arguments: it resumes the unfinished episodes of free tasks, as for any reused output folder.
+- Each process appends to the shared `episode_results.jsonl` under a lock. At the end, each process prints the summary of all results in the folder at that time.
+- Each task runs in one process, so its episodes, seeds and outputs are the same as in a run without `--task-queue`.
 
 ## Evaluation Features
 
