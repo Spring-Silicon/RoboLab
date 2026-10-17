@@ -495,6 +495,19 @@ Policy wait per control step that queries the policy, mock server, two 720×1280
 | 4 | 217–229 | 80 | 212 | 71–76 |
 | 10 | 548–555 | 114 | 543 | 98–112 |
 
+Full Isaac Sim episodes with the same mock server (not a real policy; parallel server, 20–80 ms per request or batch), `benchmark_policy_queries_env.py`, `MustardInRightBinTask`, 450 steps (45 policy queries), sensor video, GPU PhysX on one L40S that runs no other job. Policy wait and episode time are sums over one episode, in seconds, as ranges over all episodes of the mode in two runs each:
+
+| Envs | Mode | Policy wait | Episode |
+|---|---|---:|---:|
+| 4 | `serial` | 13.3–14.0 | 67.4–208.8 |
+| 4 | `auto` (`concurrent`) | 6.7–6.9 | 59.4–132.4 |
+| 4 | `batch` | 6.4–6.7 | 62.1–134.6 |
+| 10 | `serial` | 34.2–35.8 | 117.0–255.1 |
+| 10 | `auto` (`concurrent`) | 11.2–12.4 | 93.2–166.1 |
+| 10 | `batch` | 12.8–15.9 | 95.0–98.4 |
+
+The env step time changes by up to 3.8 times between episodes of the same mode, so compare the policy wait. In the steadiest run (10 envs, two episodes for each mode) the episodes took 117.0–118.0 s with `serial`, 93.2–95.2 s with `concurrent` and 95.0–98.4 s with `batch`. With `--verify-serial`, every mode applied the same actions as `serial` at all 450 steps with 4 and 10 envs. Do not use `--verify-serial` runs for timing, because they also send the serial queries.
+
 ### Running Many Evaluations per Machine
 
 One evaluation process drives a single scene from one main Python thread and keeps the GPU busy only part of each step, so a machine evaluates fastest with several processes per GPU (for example one process per task, each with its own `--output-folder-name`). With `--device cpu` (CPU PhysX), RTX rendering still runs on the GPU.
