@@ -388,6 +388,8 @@ The built-in `policies/pi0_family/run.py` supports the full set of evaluation fe
 | `--randomize-background` | Sample a random non-default background per task at registration time. The chosen texture is recorded in each task's `env_cfg.json`. See [Backgrounds — Per-Run Random Background per Task](background.md#per-run-random-background-per-task). | `False` |
 | `--background-seed N` | Seed for reproducible per-task background sampling. Used with `--randomize-background`. | `None` |
 | `--limit-cpu-threads N` | Size of Kit's carb.tasking and TBB worker pools (Isaac Sim `limit_cpu_threads`). See [Running Many Evaluations per Machine](#running-many-evaluations-per-machine). | `4` |
+| `--policy-query-mode MODE` | How the client sends the policy queries of several envs that need a new action chunk at the same step: `auto`, `serial`, `concurrent` or `batch`. See [Sending Policy Queries Together](#sending-policy-queries-together). | `auto` |
+| `--policy-query-workers N` | Maximum number of server connections in `concurrent` mode. | `16` |
 | `--headless` | Run without live display window. **Recommended for multi-task runs** — see [GPU VRAM leak in non-headless mode](debug.md#gpu-vram-leak-in-non-headless-mode-across-environment-reloads) | `False` |
 | `--enable-verbose` | Verbose output | `False` |
 | `--enable-debug` | Debug output | `False` |
@@ -463,6 +465,33 @@ Mean absolute pixel difference (0–255 scale) of the images at the consumed ste
 | Viewport | 1.33 | 1.10 | 0.93 | 0.74 | 0.50 | 0.40 |
 
 Horizon 24 without warm-up differs by 1.10 / 3.29 / 1.56–1.60. Judge whether the images your policy receives may differ this much before using the mode for results that are compared with default-rendered evaluations.
+
+### Sending Policy Queries Together
+
+With `--num_envs` above 1, several envs often need a new action chunk at the same control step. The historical client loop sends their queries one after the other, so the step waits for the sum of the server latencies. `--policy-query-mode` (`InferenceClient.configure_queries`) selects how `InferenceClient.infer_batch` sends them:
+
+| Mode | Queries | Actions compared with `serial` |
+|---|---|---|
+| `serial` | One env after the other (the historical loop). | Same. |
+| `concurrent` | One request per env, all at the same time over separate connections (at most `--policy-query-workers`). Needs `supports_concurrent_queries` (pi0, Cosmos3, GR00T). | Same requests. A server that draws noise from one shared RNG (pi0, GR00T and Cosmos flow-matching servers) gives each env a different noise sample, because the request order changes. |
+| `batch` | One request with all envs. Needs `supports_batched_queries` (GR00T, mock). | Same requests. The server computes all envs in one forward pass, so numerics and noise samples can change. Check that your GR00T server accepts a batch dimension above 1. |
+| `auto` (default) | `concurrent` for clients that set `order_independent_server` (the server output depends only on the request), else `serial`. No shipped policy client sets it, so they keep the serial loop. | Same. |
+
+A client that cannot use the selected mode falls back (`batch` to `concurrent` to `serial`). Clients that override `infer` (and VoLo, DreamZero) always use the serial loop. In every mode each env gets the same observation extraction and request as in the serial loop, and `controls_until_observation` and the action order do not change.
+
+`concurrent` reduces the step time only if the server computes several requests at the same time (several replicas or an asynchronous server). A single-process server that computes one request at a time gains only the overlap of transfer and serialization. `batch` replaces the per-env latencies with one batch latency.
+
+If a concurrent query fails, `infer_batch` waits for the other queries, closes all extra connections and raises the error; no env gets a new chunk at that step. The pi0 and Cosmos3 retries in `concurrent` mode reconnect only the failed connection and keep the chunks of the other envs (the serial retry reconnects the main connection and clears all chunks).
+
+`scripts/mock_policy_server.py` is a sleeping mock server (latency 20–80 ms per request or batch, chunk computed from the request), `scripts/benchmark_policy_queries.py` measures the modes on the CPU without Isaac Sim, and `scripts/benchmark_policy_queries_env.py` runs full episodes with the mock policy (`--verify-serial` checks every applied action and `controls_until_observation` against the serial loop on the same observation). The CPU-only tests are in `tests_cpu/` (`python -m pytest tests_cpu`).
+
+Policy wait per control step that queries the policy, mock server, two 720×1280 images per env, `benchmark_policy_queries.py --num-envs 1 4 10 --steps 60` (Ryzen 7 5800X; mean ms; all modes gave the same actions as `serial`):
+
+| Envs | `serial` | `concurrent`, parallel server | `concurrent`, one-at-a-time server | `batch` |
+|---|---|---|---|---|
+| 1 | 44–50 | 49 | 42 | 42–49 |
+| 4 | 217–229 | 80 | 212 | 71–76 |
+| 10 | 548–555 | 114 | 543 | 98–112 |
 
 ### Running Many Evaluations per Machine
 

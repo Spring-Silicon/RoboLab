@@ -13,6 +13,15 @@
   thread controls. Comparisons report changed upstream source manifests. Documented
   L40S measurements distinguish the unchanged-GPU pacing fix from opt-in CPU
   PhysX and the separately patched Isaac Lab CPU camera path.
+- `--policy-query-mode {auto,serial,concurrent,batch}` and `--policy-query-workers`
+  (`InferenceClient.configure_queries`): `infer_batch` can send the policy queries of
+  all envs that need a new chunk at the same step concurrently (pi0, Cosmos3, GR00T)
+  or as one batched request (GR00T). The default `auto` keeps the serial loop for
+  every shipped client, because their servers sample noise from a shared RNG.
+  Evaluation runners now close the client after each task. Sleeping mock policy
+  server and benchmarks: `scripts/mock_policy_server.py`,
+  `scripts/benchmark_policy_queries.py`, `scripts/benchmark_policy_queries_env.py`.
+  Measurements in `docs/environment_run.md`.
 - Opt-in render-on-demand evaluation for action-chunking clients without video:
   `--render-policy-steps-only` (`run_episode(render_policy_steps_only=True)`) renders,
   reads back cameras and computes camera observation groups only on control steps
