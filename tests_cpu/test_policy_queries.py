@@ -143,6 +143,28 @@ def test_concurrent_queries_overlap_and_close():
     assert client._query_executor is None
 
 
+def test_failed_concurrent_query_waits_for_all_workers_and_reconnects():
+    class Failing(FakeClient):
+        def _query_server_on(self, connection, request):
+            if self.calls["on"] == 0 and connection is self.opened[0]:
+                self.calls["on"] += 1
+                raise ConnectionError("lost")
+            return super()._query_server_on(connection, request)
+
+    client = Failing(delay_s=0.05)
+    client.configure_queries(mode="concurrent", max_workers=3)
+    with pytest.raises(ConnectionError):
+        client.infer_batch(make_obs(0), "pick", env_ids=list(range(NUM_ENVS)))
+    # The error is raised only after the other workers finished, on closed connections.
+    assert client.active == 0
+    assert all(conn["closed"] for conn in client.opened)
+    # No chunk was stored for the failed step: the retry queries every env on new connections.
+    rets = client.infer_batch(make_obs(0), "pick", env_ids=list(range(NUM_ENVS)))
+    assert sorted(rets) == list(range(NUM_ENVS))
+    assert len(client.opened) == 6
+    client.close()
+
+
 def test_auto_is_serial_unless_server_is_order_independent():
     class OrderDependent(FakeClient):
         order_independent_server = False

@@ -5,7 +5,7 @@
 # droid_plus/eval/base_client.py — keep both in sync when editing.
 
 from abc import ABC, abstractmethod
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Any
 
 import numpy as np
@@ -404,6 +404,14 @@ class InferenceClient(ABC):
             )
             for worker in range(n)
         ]
+        # Wait for every worker before raising, so no thread still uses a connection.
+        wait(futures)
+        errors = [future.exception() for future in futures if future.exception() is not None]
+        if errors:
+            # A failed connection can hold a half-sent request; open new ones for the next call.
+            while self._query_connections:
+                self._close_connection(self._query_connections.pop())
+            raise errors[0]
         per_worker = [future.result() for future in futures]
         responses = [None] * len(requests)
         for worker, worker_responses in enumerate(per_worker):
