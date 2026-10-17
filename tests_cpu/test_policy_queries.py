@@ -297,3 +297,54 @@ def test_mock_server_actions_match_across_modes():
     finally:
         proc.kill()
         proc.wait()
+
+
+def test_gr00t_batch_request_gives_each_env_its_own_chunk():
+    for module in ("cv2", "msgpack", "msgpack_numpy", "zmq"):
+        pytest.importorskip(module)
+    from policies.gr00t.client import GR00TDroidJointposClient
+
+    class RowServer:
+        """Like a GR00T server: one (B, horizon, dim) action per batch row, computed from that row only."""
+
+        def __init__(self):
+            self.batch_sizes = []
+
+        def get_action(self, request):
+            joints = request["state.joint_position"][:, 0]  # (B, 7)
+            pixels = request["video.wrist_image_left"][:, 0].reshape(len(joints), -1).mean(axis=1)
+            assert len(request["annotation.language.language_instruction"]) == len(joints)
+            self.batch_sizes.append(len(joints))
+            steps = np.arange(HORIZON, dtype=np.float32)[None, :, None]
+            return {
+                "action.joint_position": joints[:, None, :] + steps + pixels[:, None, None],
+                "action.gripper_position": (joints[:, None, :1] + steps) % 2,
+            }, {}
+
+    client = GR00TDroidJointposClient.__new__(GR00TDroidJointposClient)
+    InferenceClient.__init__(client)
+    client.open_loop_horizon = HORIZON
+    client.client = RowServer()
+    rng = np.random.default_rng(0)
+    requests = [
+        client._pack_request({
+            "external_image": rng.integers(0, 255, (360, 640, 3), dtype=np.uint8),
+            "wrist_image": rng.integers(0, 255, (360, 640, 3), dtype=np.uint8),
+            "joint_position": rng.normal(size=7).astype(np.float32),
+            "gripper_position": np.zeros(1, dtype=np.float32),
+            "eef_9d": np.zeros(9, dtype=np.float32),
+        }, "pick")
+        for _ in range(3)
+    ]
+    serial = [client._unpack_response(client._query_server(request)) for request in requests]
+    batched = [client._unpack_response(response) for response in client._query_server_batch(requests)]
+    assert client.client.batch_sizes == [1, 1, 1, 3]
+    for one, many in zip(serial, batched, strict=True):
+        assert one.shape == (HORIZON, 8)
+        np.testing.assert_array_equal(many, one)
+
+    # A server that ignores the batch axis is detected instead of giving env 0's chunk to all envs.
+    client.client.get_action = lambda request: ({"action.joint_position": np.zeros((1, HORIZON, 7)),
+                                                 "action.gripper_position": np.zeros((1, HORIZON, 1))}, {})
+    with pytest.raises(ValueError):
+        client._query_server_batch(requests)
