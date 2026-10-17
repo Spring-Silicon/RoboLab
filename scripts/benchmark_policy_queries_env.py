@@ -14,7 +14,10 @@ For each episode the script stores the applied actions and the arm joint
 positions of every step (``<mode-index>_<mode>.npz``) and reports the episode
 wall time, the ``run_episode`` timing breakdown and whether actions and joint
 positions are equal to the first episode. Repeat ``serial`` to see the
-episode-to-episode noise of the simulation itself.
+episode-to-episode noise of the simulation itself: the mock chunk is a hash
+of the images, so a one-bit render difference gives other actions. For the
+applied-action proof use ``--verify-serial``: it checks each step against
+the serial loop on the same observation.
 
 The script imports ``robolab`` from ``PYTHONPATH`` (``gpujob`` sets it), so
 the same file can measure a tree without query modes: there every mode is
@@ -50,6 +53,10 @@ parser.add_argument("--horizon", type=int, default=10, help="Action chunk length
 parser.add_argument("--port", type=int, default=6223)
 parser.add_argument("--video-mode", choices=["none", "sensor"], default="sensor")
 parser.add_argument("--limit-cpu-threads", "--limit_cpu_threads", type=int, default=4)
+parser.add_argument("--verify-serial", action="store_true",
+                    help="At every step, also run the serial loop on the same observation with a copy of the "
+                         "client state and count the envs whose action or controls_until_observation differ. "
+                         "Adds the serial query latency, so do not use these episode times.")
 parser.add_argument("--output", required=True, help="New output directory.")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
@@ -70,19 +77,44 @@ from robolab.registrations.droid.auto_env_registrations_jointpos import auto_reg
 class RecordingClient(mock.MockPolicyClient):
     """Mock client that keeps the actions it returns (the actions ``run_episode`` applies)."""
 
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.shadow = mock.MockPolicyClient(*a, **kw) if args.verify_serial else None
+
     def begin_episode(self, episode_idx):
         super().begin_episode(episode_idx)
         self.actions, self.joints, self.query_steps = [], [], 0
+        self.verified_steps, self.mismatches = 0, 0
 
     def infer_batch(self, obs, instruction, *, env_ids):
         self.query_steps += any(self._needs_refresh(env_id) for env_id in env_ids)
+        expected = None
+        if self.shadow is not None:
+            # The historical serial loop over infer(), from the same state and observation.
+            self.shadow._chunks, self.shadow._counters = dict(self._chunks), dict(self._counters)
+            expected = {
+                env_id: (self.shadow.infer(obs, instruction, env_id=env_id)["action"],
+                         self.shadow.controls_until_observation(env_id))
+                for env_id in env_ids
+            }
         rets = super().infer_batch(obs, instruction, env_ids=env_ids)
+        if expected is not None:
+            self.verified_steps += 1
+            self.mismatches += sum(
+                not np.array_equal(rets[env_id]["action"], action) or self.controls_until_observation(env_id) != cuo
+                for env_id, (action, cuo) in expected.items()
+            )
         step_actions = np.full((args.num_envs, mock.ARM_DOF + 1), np.nan, dtype=np.float32)
         for env_id, ret in rets.items():
             step_actions[env_id] = ret["action"]
         self.actions.append(step_actions)
         self.joints.append(obs["proprio_obs"]["arm_joint_pos"].detach().cpu().numpy().copy())
         return rets
+
+    def close(self):
+        super().close()
+        if self.shadow is not None:
+            self.shadow.close()
 
 
 def sha(array):
@@ -131,10 +163,13 @@ try:
             "joints_sha256": sha(joints),
             "actions_equal_first": bool(np.array_equal(actions, reference[0], equal_nan=True)),
             "joints_equal_first": bool(np.array_equal(joints, reference[1])),
+            "serial_verified_steps": client.verified_steps,
+            "serial_mismatched_env_steps": client.mismatches,
         }
         records.append(record)
         print(f"EPISODE {index} {mode}->{effective}: {episode_s:.2f} s, {len(actions)} steps, "
-              f"actions_equal_first={record['actions_equal_first']} joints_equal_first={record['joints_equal_first']}",
+              f"actions_equal_first={record['actions_equal_first']} joints_equal_first={record['joints_equal_first']} "
+              f"serial_mismatches={client.mismatches}/{client.verified_steps} steps",
               flush=True)
     payload = {
         "benchmark": "policy_queries_env",
