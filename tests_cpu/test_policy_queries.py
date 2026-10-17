@@ -74,16 +74,19 @@ class FakeClient(InferenceClient):
         return self._compute(request)
 
     def _open_connection(self):
-        conn = {"closed": False}
+        conn = {"closed": False, "thread": threading.get_ident()}
         self.opened.append(conn)
         return conn
 
     def _query_server_on(self, connection, request):
+        # Each connection is used only on the thread that opened it (ZeroMQ sockets need this).
+        assert connection["thread"] == threading.get_ident() != threading.main_thread().ident
         assert not connection["closed"]
         self.calls["on"] += 1
         return self._compute(request)
 
     def _close_connection(self, connection):
+        assert connection["thread"] == threading.get_ident()
         connection["closed"] = True
 
     def _query_server_batch(self, requests):
@@ -140,7 +143,25 @@ def test_concurrent_queries_overlap_and_close():
     assert len(client.opened) == 3
     client.close()
     assert all(conn["closed"] for conn in client.opened)
-    assert client._query_executor is None
+    assert client._query_threads == [] and client._query_connections == []
+
+
+@pytest.mark.parametrize("mode", ["concurrent", "batch"])
+def test_unordered_env_ids_match_serial_loop(mode):
+    serial = FakeClient()
+    serial.configure_queries(mode="serial")
+    fast = FakeClient()
+    fast.configure_queries(mode=mode, max_workers=2)
+    env_ids = [4, 0, 5, 2]
+    for step in range(2 * HORIZON + 1):
+        obs = make_obs(step)
+        expected = serial.infer_batch(obs, "pick", env_ids=env_ids)
+        got = fast.infer_batch(obs, "pick", env_ids=env_ids)
+        assert list(got) == env_ids
+        for env_id in env_ids:
+            np.testing.assert_array_equal(got[env_id]["action"], expected[env_id]["action"])
+            assert fast.controls_until_observation(env_id) == serial.controls_until_observation(env_id)
+    fast.close()
 
 
 def test_failed_concurrent_query_waits_for_all_workers_and_reconnects():

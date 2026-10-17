@@ -63,9 +63,10 @@ class InferenceClient(ABC):
         self._counters: dict[int, int] = {}
         # Set by begin_episode(); see below.
         self._eval_episode_idx: int = 0
-        # Extra connections and worker threads for concurrent queries, opened on first use.
+        # Concurrent-query connections, opened on first use. Connection i is
+        # opened, used and closed only on the thread of executor i.
         self._query_connections: list[Any] = []
-        self._query_executor: ThreadPoolExecutor | None = None
+        self._query_threads: list[ThreadPoolExecutor] = []
 
     def configure_queries(self, *, mode: str | None = None, max_workers: int | None = None) -> None:
         """Select how ``infer_batch`` sends the queries of several envs at one control step.
@@ -249,16 +250,19 @@ class InferenceClient(ABC):
     def _open_connection(self) -> Any:
         """Open one more server connection for concurrent queries.
 
-        Required with ``supports_concurrent_queries``. Called from the main
-        thread; each connection is then used by one worker thread at a time.
+        Required with ``supports_concurrent_queries``. Each connection has its
+        own worker thread: this hook, ``_query_server_on`` and
+        ``_close_connection`` for it run only on that thread, so transports
+        whose sockets are not thread-safe (ZeroMQ) need no locks.
         """
         raise NotImplementedError
 
     def _query_server_on(self, connection: Any, request: Any) -> Any:
         """Like ``_query_server``, over a connection from ``_open_connection``.
 
-        Required with ``supports_concurrent_queries``. Runs on a worker thread:
-        touch only ``connection`` and ``request``, no other client state.
+        Required with ``supports_concurrent_queries``. Runs on the worker thread
+        of ``connection``: touch only ``connection`` and ``request``, no other
+        client state.
         """
         raise NotImplementedError
 
@@ -390,14 +394,9 @@ class InferenceClient(ABC):
 
         # Request i goes to connection i % n: a fixed assignment, results stay in request order.
         n = min(len(requests), self.max_concurrent_queries)
-        while len(self._query_connections) < n:
-            self._query_connections.append(self._open_connection())
-        if self._query_executor is None:
-            self._query_executor = ThreadPoolExecutor(
-                max_workers=self.max_concurrent_queries, thread_name_prefix="policy-query"
-            )
+        self._open_query_connections(n)
         futures = [
-            self._query_executor.submit(
+            self._query_threads[worker].submit(
                 lambda conn, reqs: [self._query_server_on(conn, req) for req in reqs],
                 self._query_connections[worker],
                 requests[worker::n],
@@ -409,20 +408,46 @@ class InferenceClient(ABC):
         errors = [future.exception() for future in futures if future.exception() is not None]
         if errors:
             # A failed connection can hold a half-sent request; open new ones for the next call.
-            while self._query_connections:
-                self._close_connection(self._query_connections.pop())
+            self._close_query_connections(raise_errors=False)
             raise errors[0]
-        per_worker = [future.result() for future in futures]
         responses = [None] * len(requests)
-        for worker, worker_responses in enumerate(per_worker):
-            responses[worker::n] = worker_responses
+        for worker, future in enumerate(futures):
+            responses[worker::n] = future.result()
         return responses
 
-    def _close_query_connections(self) -> None:
-        executor = getattr(self, "_query_executor", None)
-        if executor is not None:
-            executor.shutdown(wait=True)
-            self._query_executor = None
+    def _open_query_connections(self, n: int) -> None:
+        """Make sure that ``n`` connections exist, each opened on its own worker thread."""
+        new_threads = [
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"policy-query-{index}")
+            for index in range(len(self._query_threads), n)
+        ]
+        futures = [thread.submit(self._open_connection) for thread in new_threads]
+        wait(futures)
+        for thread, future in zip(new_threads, futures, strict=True):
+            self._query_threads.append(thread)
+            self._query_connections.append(future.result() if future.exception() is None else None)
+        errors = [future.exception() for future in futures if future.exception() is not None]
+        if errors:
+            self._close_query_connections(raise_errors=False)
+            raise errors[0]
+
+    def _close_query_connections(self, *, raise_errors: bool = True) -> None:
+        """Close every connection on its own thread, then stop the threads.
+
+        With ``raise_errors=False`` (after a failed query) close errors are
+        dropped, so that the query error is the one that the caller sees.
+        """
         connections = getattr(self, "_query_connections", [])
-        while connections:
-            self._close_connection(connections.pop())
+        threads = getattr(self, "_query_threads", [])
+        closes = [
+            thread.submit(self._close_connection, connection)
+            for thread, connection in zip(threads, connections, strict=True)
+            if connection is not None
+        ]
+        for thread in threads:
+            thread.shutdown(wait=True)
+        connections.clear()
+        threads.clear()
+        errors = [close.exception() for close in closes if close.exception() is not None]
+        if errors and raise_errors:
+            raise errors[0]

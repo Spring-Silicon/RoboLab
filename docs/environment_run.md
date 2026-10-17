@@ -481,6 +481,8 @@ A client that cannot use the selected mode falls back (`batch` to `concurrent` t
 
 `concurrent` reduces the step time only if the server computes several requests at the same time (several replicas or an asynchronous server). A single-process server that computes one request at a time gains only the overlap of transfer and serialization. `batch` replaces the per-env latencies with one batch latency.
 
+Each extra connection has its own worker thread. The client opens, uses and closes a connection only on that thread, so transports whose sockets are not thread-safe (ZeroMQ for GR00T) are safe without locks.
+
 If a concurrent query fails, `infer_batch` waits for the other queries, closes all extra connections and raises the error; no env gets a new chunk at that step. The pi0 and Cosmos3 retries in `concurrent` mode reconnect only the failed connection and keep the chunks of the other envs (the serial retry reconnects the main connection and clears all chunks).
 
 `scripts/mock_policy_server.py` is a sleeping mock server (latency 20–80 ms per request or batch, chunk computed from the request), `scripts/benchmark_policy_queries.py` measures the modes on the CPU without Isaac Sim, and `scripts/benchmark_policy_queries_env.py` runs full episodes with the mock policy (`--verify-serial` checks every applied action and `controls_until_observation` against the serial loop on the same observation). The CPU-only tests are in `tests_cpu/` (`python -m pytest tests_cpu`).
