@@ -70,6 +70,9 @@ class OrchestratorMetadataMixin:
     # Class-level alias so subclasses can override the wire map.
     ORCHESTRATOR_KEY_MAP = ORCHESTRATOR_KEY_MAP
 
+    # The proxy keeps per-connection state (``__episode_id``), so keep one connection.
+    supports_concurrent_queries = False
+
     def _extract_observation(self, raw_obs, *, env_id: int = 0) -> dict:
         extracted = super()._extract_observation(raw_obs, env_id=env_id)
         extracted["_orchestrator_keys"] = self._orchestrator_keys(raw_obs, env_id=env_id)

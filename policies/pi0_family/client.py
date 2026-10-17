@@ -24,6 +24,8 @@ class Pi0DroidJointposClient(InferenceClient):
         "pi05": 15,
     }
     FALLBACK_HORIZON: int = 15
+    # openpi's websocket server accepts several connections (one per concurrent query).
+    supports_concurrent_queries = True
 
     def __init__(
         self,
@@ -52,13 +54,17 @@ class Pi0DroidJointposClient(InferenceClient):
             return websocket_client_policy.WebsocketClientPolicy(self._remote_uri)
         return websocket_client_policy.WebsocketClientPolicy(self._remote_host, self._remote_port)
 
-    def _infer_with_retry(self, request: dict, max_retries: int = 3) -> dict:
-        """Call server, reconnecting up to ``max_retries`` times on connection drop."""
+    def _infer_with_retry(self, request: dict, max_retries: int = 3, slot: list | None = None) -> dict:
+        """Call server, reconnecting up to ``max_retries`` times on connection drop.
+
+        ``slot`` is a concurrent-query connection (``[client]``, see ``_open_connection``);
+        None uses the main connection.
+        """
         import websockets.exceptions
 
         for attempt in range(max_retries):
             try:
-                return self.client.infer(request)
+                return (self.client if slot is None else slot[0]).infer(request)
             except (
                 websockets.exceptions.ConnectionClosedError,
                 websockets.exceptions.ConnectionClosedOK,
@@ -70,10 +76,24 @@ class Pi0DroidJointposClient(InferenceClient):
                     "[%s] Connection lost (%s), reconnecting (attempt %d/%d)...",
                     self.__class__.__name__, e, attempt + 1, max_retries,
                 )
+                if slot is not None:
+                    # Worker thread: replace only this connection. The batch sets the chunks it queried.
+                    slot[0] = self._connect()
+                    continue
                 self.client = self._connect()
                 # Flush chunk cache so all envs re-request on next step
                 self._chunks.clear()
                 self._counters.clear()
+
+    def _open_connection(self) -> list:
+        # Mutable one-item slot, so a reconnect on a worker thread replaces the client in place.
+        return [self._connect()]
+
+    def _query_server_on(self, connection: list, request: dict) -> dict:
+        return self._infer_with_retry(request, slot=connection)
+
+    def _close_connection(self, connection: list) -> None:
+        super()._close_connection(connection[0])
 
     # ---- required hooks -----------------------------------------------
 

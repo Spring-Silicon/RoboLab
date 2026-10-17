@@ -199,6 +199,11 @@ def _as_action_chunk(value: Any, *, name: str) -> np.ndarray:
 class GR00TDroidJointposClient(InferenceClient):
     """Inference client for GR00T N1.7 DROID with joint position actions."""
 
+    # A GR00T REP server queues requests from several REQ sockets.
+    supports_concurrent_queries = True
+    # Requests carry a leading batch axis (B=1); ``--policy-query-mode batch`` stacks envs on it.
+    supports_batched_queries = True
+
     def __init__(
         self,
         remote_host: str = "localhost",
@@ -208,6 +213,7 @@ class GR00TDroidJointposClient(InferenceClient):
     ) -> None:
         super().__init__()
         self.open_loop_horizon = int(open_loop_horizon)
+        self._remote = (remote_host, remote_port, api_token)
         print(f"[{self.__class__.__name__}] Connecting to GR00T policy server at {remote_host}:{remote_port}...")
         self.client = GR00TPolicyClient(host=remote_host, port=remote_port, api_token=api_token)
         print(
@@ -251,6 +257,32 @@ class GR00TDroidJointposClient(InferenceClient):
     def _query_server(self, request: dict) -> tuple:
         return self.client.get_action(request)
 
+    def _open_connection(self) -> GR00TPolicyClient:
+        host, port, api_token = self._remote
+        return GR00TPolicyClient(host=host, port=port, api_token=api_token)
+
+    def _query_server_on(self, connection: GR00TPolicyClient, request: dict) -> tuple:
+        return connection.get_action(request)
+
+    def _query_server_batch(self, requests: list[dict]) -> list[tuple]:
+        language_key = "annotation.language.language_instruction"
+        batched = {
+            key: (
+                [text for request in requests for text in request[key]]
+                if key == language_key
+                else np.concatenate([request[key] for request in requests], axis=0)
+            )
+            for key in requests[0]
+        }
+        action_dict, info = self.client.get_action(batched)
+        batch = len(requests)
+        for key, value in action_dict.items():
+            shape = np.shape(value)
+            if len(shape) != 3 or shape[0] != batch:
+                raise ValueError(f"Batched GR00T action {key!r} has shape {shape}, expected ({batch}, horizon, dim)")
+        # Each env's response keeps a leading axis of 1, like a single-env response.
+        return [({key: np.asarray(value)[i : i + 1] for key, value in action_dict.items()}, info) for i in range(batch)]
+
     def _unpack_response(self, response: tuple) -> np.ndarray:
         action_dict = response[0]
         joint_action = _as_action_chunk(
@@ -276,6 +308,7 @@ class GR00TDroidJointposClient(InferenceClient):
         return np.concatenate([ext_img, wrist_img], axis=1)
 
     def close(self) -> None:
+        super().close()
         self.client.close()
 
 
