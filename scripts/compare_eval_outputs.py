@@ -4,12 +4,15 @@ Usage: python scripts/compare_eval_outputs.py BASE_DIR CANDIDATE_DIR --output co
 
 Both folders come from robolab.eval.runner (for example scripts/scripted_eval.py). For each
 task folder in BASE_DIR, the script compares:
-  * episode_results.jsonl rows (all fields except timing, duration and policy-free paths),
-  * every run_*.hdf5: all non-image datasets and attributes must be bit-identical; camera
-    images (uint8 arrays with 3 or more dimensions) give mean and max absolute pixel
-    differences, because RTX images are not bitwise repeatable between processes,
-  * env_cfg.json.
-Exit status is 1 if a non-image value differs or a file is missing.
+  * episode_results.jsonl rows (all fields except timing and duration); a key
+    (env_name, episode) that appears twice in one folder is a failure,
+  * every run_*.hdf5: the same files on both sides; all non-image datasets and dataset
+    attributes must be bit-identical; camera images (uint8 arrays with 3 or more
+    dimensions) give mean and max absolute pixel differences, because RTX images are not
+    bitwise repeatable between processes,
+  * the names of the *.mp4 videos,
+  * env_cfg.json (without output paths).
+Exit status is 1 if a non-image value differs or a file is missing or extra.
 """
 from __future__ import annotations
 
@@ -24,13 +27,16 @@ import numpy as np
 IGNORED_RESULT_KEYS = {"timing", "duration"}
 
 
-def load_rows(folder: Path) -> dict[tuple[str, int], dict]:
-    rows = {}
+def load_rows(folder: Path) -> tuple[dict[tuple[str, int], dict], list[list]]:
+    rows, duplicates = {}, []
     for line in (folder / "episode_results.jsonl").read_text().splitlines():
         if line.strip():
             row = json.loads(line)
-            rows[(row["env_name"], row["episode"])] = {k: v for k, v in row.items() if k not in IGNORED_RESULT_KEYS}
-    return rows
+            key = (row["env_name"], row["episode"])
+            if key in rows:
+                duplicates.append(list(key))
+            rows[key] = {k: v for k, v in row.items() if k not in IGNORED_RESULT_KEYS}
+    return rows, duplicates
 
 
 def is_image(dataset: h5py.Dataset) -> bool:
@@ -40,7 +46,7 @@ def is_image(dataset: h5py.Dataset) -> bool:
 def compare_hdf5(base: Path, cand: Path) -> dict:
     mismatches, images = [], {}
     with h5py.File(base) as fb, h5py.File(cand) as fc:
-        names_b, names_c = [], []
+        names_b, names_c = ["/"], ["/"]  # "/" checks the root attributes
         fb.visit(names_b.append)
         fc.visit(names_c.append)
         if sorted(names_b) != sorted(names_c):
@@ -73,7 +79,7 @@ def compare_hdf5(base: Path, cand: Path) -> dict:
 
 
 def compare(base_dir: Path, cand_dir: Path) -> dict:
-    rows_b, rows_c = load_rows(base_dir), load_rows(cand_dir)
+    (rows_b, dup_b), (rows_c, dup_c) = load_rows(base_dir), load_rows(cand_dir)
     row_diffs = [
         {"key": list(key), "base": rows_b.get(key), "candidate": rows_c.get(key)}
         for key in sorted(set(rows_b) | set(rows_c))
@@ -83,20 +89,24 @@ def compare(base_dir: Path, cand_dir: Path) -> dict:
     for task in sorted({key[0] for key in rows_b}):
         tb, tc = base_dir / task, cand_dir / task
         result = {"runs": {}, "missing": []}
-        for h5 in sorted(tb.glob("run_*.hdf5")):
-            if (tc / h5.name).is_file():
-                result["runs"][h5.name] = compare_hdf5(h5, tc / h5.name)
-            else:
-                result["missing"].append(h5.name)
+        names_b = {p.name for p in tb.glob("run_*.hdf5")}
+        names_c = {p.name for p in tc.glob("run_*.hdf5")}
+        result["missing"] = sorted(names_b - names_c)
+        result["extra"] = sorted(names_c - names_b)
+        for name in sorted(names_b & names_c):
+            result["runs"][name] = compare_hdf5(tb / name, tc / name)
+        result["videos_equal"] = {p.name for p in tb.glob("*.mp4")} == {p.name for p in tc.glob("*.mp4")}
         cfg_b, cfg_c = tb / "env_cfg.json", tc / "env_cfg.json"
         result["env_cfg_equal"] = cfg_c.is_file() and _cfg(cfg_b) == _cfg(cfg_c)
         result["success"] = {str(k[1]): rows_b[k].get("success") for k in rows_b if k[0] == task}
         tasks[task] = result
-    passed = not row_diffs and all(
-        not t["missing"] and t["env_cfg_equal"] and all(not r["non_image_mismatches"] for r in t["runs"].values())
+    passed = not row_diffs and not dup_b and not dup_c and all(
+        not t["missing"] and not t["extra"] and t["videos_equal"] and t["env_cfg_equal"]
+        and all(not r["non_image_mismatches"] for r in t["runs"].values())
         for t in tasks.values()
     )
     return {"base": str(base_dir), "candidate": str(cand_dir), "passed": passed,
+            "duplicate_rows": {"base": dup_b, "candidate": dup_c},
             "result_row_diffs": row_diffs, "tasks": tasks}
 
 
