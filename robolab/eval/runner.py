@@ -94,15 +94,17 @@ def add_common_eval_args(parser: argparse.ArgumentParser) -> None:
                         help=("Which videos to save: 'all' (sensor + viewport), "
                               "'viewport' only, 'sensor' only, or 'none' (default: all)."))
     parser.add_argument("--render-policy-steps-only", "--render_policy_steps_only", action="store_true",
-                        help=("Render cameras and compute image observations only on control steps whose "
-                              "observation the client queries its policy with (action-chunking clients "
-                              "with open_loop_horizon > 1). Physics, non-image observations, recorders and "
-                              "success checks still run every step. Requires --video-mode none."))
+                        help=("Render the cameras that only the policy reads, and compute their image "
+                              "observations, only on control steps whose observation the client queries its "
+                              "policy with (action-chunking clients with open_loop_horizon > 1). The video "
+                              "cameras (--video-mode) still render on every step, so videos keep all frames; the "
+                              "other cameras' render products are disabled on the other steps. Physics, "
+                              "non-image observations, recorders and success checks still run every step. "
+                              "Policy images can differ from the default (RTX temporal history)."))
     parser.add_argument("--render-warmup-steps", "--render_warmup_steps", type=int, default=0,
-                        help=("With --render-policy-steps-only, also render (without camera read-back) this "
-                              "many steps before each consumed step, so RTX temporal history matches rendering "
-                              "every step more closely; >= open_loop_horizon - 1 renders every step and gives "
-                              "the default pixels (default: 0)."))
+                        help=("With --render-policy-steps-only, also render all cameras (without reading the "
+                              "policy cameras) this many steps before each consumed step, to give RTX temporal "
+                              "history more frames; >= open_loop_horizon - 1 renders every step (default: 0)."))
     parser.add_argument("--renderer", type=str, default="realtime",
                         choices=["realtime", "pathtracing"],
                         help=("RTX renderer mode (default: realtime). 'realtime' uses "
@@ -150,8 +152,6 @@ def run_evaluation(
             ``args``. Called once per task; the client is reused across runs
             within a task.
     """
-    if args.render_policy_steps_only and args.video_mode != "none":
-        raise ValueError("--render-policy-steps-only requires --video-mode none")
     if args.render_warmup_steps and not args.render_policy_steps_only:
         raise ValueError("--render-warmup-steps requires --render-policy-steps-only")
     import os

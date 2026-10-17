@@ -67,7 +67,9 @@ from robolab.core.observations.observation_utils import (
 )
 from robolab.core.utils.video_utils import VideoWriter
 from robolab.core.world.world_state import get_world
+from robolab.core.events.basic_recorders import PreStepFlatPolicyObservationsRecorder
 from robolab.eval.base_client import InferenceClient
+from robolab.eval.camera_gating import CameraRenderGate
 
 
 def run_episode(
@@ -103,20 +105,25 @@ def run_episode(
         enable_gt_state: Attach per-env ground-truth sim state to the obs dict
             as ``obs["gt_state"] = {env_id: state}`` each step (see
             ``robolab/eval/gt_state.py`` for the schema).
-        render_policy_steps_only: Render, read back cameras and compute camera
-            observation groups only for steps whose observation the client
-            will query its policy with (``client.controls_until_observation``
-            is 0 for any active env). Other steps skip all three, and their
-            camera groups are unrendered placeholders that raise if read.
-            Physics, non-camera observations, recorders and success checks run
-            on every step. Requires ``save_videos=False`` and no recording of
-            policy observations. Default False: render every step.
+        render_policy_steps_only: Render the cameras that only the policy
+            reads, and compute their observation groups, only on steps whose
+            observation the client queries its policy with
+            (``client.controls_until_observation`` is 0 for any active env).
+            The video groups (``image_obs`` for sensor video, ``viewport_cam``
+            for viewport video) render and are computed on every step, so
+            videos keep all frames. On the other steps, the render products
+            of the other cameras are disabled (not rendered), their groups are
+            unrendered placeholders that raise if read, and a step without
+            video groups does not render. Physics, non-camera observations,
+            recorders and success checks run on every step. Recorded policy
+            observations hold zero rows for unrendered groups and a
+            ``camera_rendered`` mask. Default False: render every step.
         render_warmup_steps: With ``render_policy_steps_only``, also render
-            (without reading cameras) this many steps before each consumed
-            step. RTX real-time rendering keeps temporal history, so consumed
-            images move closer to rendering every step as this grows; at
-            ``open_loop_horizon - 1`` or more every step renders and only the
-            camera read-back and image observations are skipped. Default 0.
+            all cameras (without reading the gated cameras) this many steps
+            before each consumed step. RTX real-time rendering keeps temporal
+            history (for example denoising and anti-aliasing), so this changes
+            the consumed images; at ``open_loop_horizon - 1`` or more every
+            step renders all cameras. Default 0.
 
     Returns:
         tuple: (env_results, subtask_status, timing)
@@ -124,15 +131,23 @@ def run_episode(
             subtask_status: list of per-step subtask info dicts
             timing: dict with wall-clock timing breakdown
     """
+    camera_gate = None
     if render_policy_steps_only:
-        if save_videos and video_mode != "none":
-            raise ValueError("render_policy_steps_only requires video recording to be disabled")
-        if getattr(env_cfg.recorders, "record_policy_observations", None) is not None:
-            raise ValueError("render_policy_steps_only cannot record policy observations (RECORD_IMAGE_DATA)")
         if render_warmup_steps < 0:
             raise ValueError("render_warmup_steps must be >= 0")
+        every_step_groups = []
+        if save_videos and video_mode in ("all", "sensor"):
+            every_step_groups.append("image_obs")
+        if save_videos and video_mode in ("all", "viewport"):
+            every_step_groups.append("viewport_cam")
+        camera_gate = CameraRenderGate(env, every_step_groups)
     elif render_warmup_steps:
         raise ValueError("render_warmup_steps requires render_policy_steps_only")
+    # Recorded policy observations of unrendered groups become zero rows with a camera_rendered mask.
+    obs_recorders = [
+        recorder for recorder in getattr(env.recorder_manager, "_terms", {}).values()
+        if isinstance(recorder, PreStepFlatPolicyObservationsRecorder)
+    ] if camera_gate is not None else []
 
     cuda_device = torch.device(env.device)
     if cuda_device.type == "cuda":
@@ -195,6 +210,8 @@ def run_episode(
 
     actual_steps = 0
     active_env_steps = 0
+    for recorder in obs_recorders:
+        recorder.record_render_mask = True
     try:
         for step in tqdm(range(max_steps)):
 
@@ -241,13 +258,11 @@ def run_episode(
                 get_world(env).visualize()
 
             timer.start("env_step")
-            if render_policy_steps_only:
+            if camera_gate is not None:
                 # Steps until any active env next queries its policy with an observation.
                 until_consumed = min(client.controls_until_observation(env_id) for env_id in active_env_ids)
                 obs, reward, term, trunc, info = env.step(
-                    actions,
-                    render=until_consumed <= render_warmup_steps,
-                    camera_observations=until_consumed == 0,
+                    actions, **camera_gate.step_options(until_consumed, render_warmup_steps)
                 )
             else:
                 obs, reward, term, trunc, info = env.step(actions)
@@ -290,6 +305,14 @@ def run_episode(
             if env.all_terminated:
                 break
     finally:
+        if camera_gate is not None:
+            # Resets read the cameras, so all render products are enabled again.
+            try:
+                camera_gate.restore()
+            except Exception:
+                logger.exception("Failed to enable the camera render products again")
+        for recorder in obs_recorders:
+            recorder.record_render_mask = False
         for vw in video_writers_obs + video_writers_viewport:
             try:
                 vw.release()

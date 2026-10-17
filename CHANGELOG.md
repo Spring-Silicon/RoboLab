@@ -13,18 +13,22 @@
   thread controls. Comparisons report changed upstream source manifests. Documented
   L40S measurements distinguish the unchanged-GPU pacing fix from opt-in CPU
   PhysX and the separately patched Isaac Lab CPU camera path.
-- Opt-in render-on-demand evaluation for action-chunking clients without video:
+- Opt-in render-on-demand evaluation for action-chunking clients:
   `--render-policy-steps-only` (`run_episode(render_policy_steps_only=True)`) renders,
   reads back cameras and computes camera observation groups only on control steps
   whose observation the client queries its policy with
   (`InferenceClient.controls_until_observation`). Other steps return
   `UnrenderedObservationGroup` placeholders that raise if read, so no stale image
   reaches a policy; physics, non-image observations, recorders and success checks
-  still run every step. Requires `--video-mode none` and no image recording. The
-  default (render every step) is unchanged. RTX temporal history makes skipped-step
-  images differ from rendering every step; `--render-warmup-steps N` renders the `N`
-  preceding steps (no read-back), and `N >= open_loop_horizon - 1` restores the
-  default pixels. Measurements in `docs/environment_run.md`.
+  still run every step. Video groups (`image_obs` for sensor video, `viewport_cam`
+  for viewport video) render every step, so videos keep all frames; the other
+  cameras' render products are disabled on skipped steps
+  (`TiledCamera.set_render_product_enabled`). Recorded policy observations
+  (`--record-image-data`) hold zero rows for skipped camera groups and an
+  `obs/camera_rendered/<group>` mask. The default (render every step) is unchanged.
+  RTX temporal history makes skipped-step images differ from rendering every step;
+  `--render-warmup-steps N` renders the `N` preceding steps (no read-back).
+  Measurements in `docs/environment_run.md`.
 - `--limit-cpu-threads` (default 4) for evaluation runners and `scripts/benchmark_speed.py`,
   forwarded to Isaac Sim's `limit_cpu_threads` to size Kit's carb.tasking and TBB worker pools
   (Isaac Sim's default is 32). One eval process keeps only a few workers busy; the default pools

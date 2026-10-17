@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from dataclasses import MISSING
 
 import torch
+from isaaclab.managers import UnrenderedObservationGroup
 from isaaclab.managers.recorder_manager import RecorderTerm, RecorderTermCfg
 from isaaclab.sensors import Camera
 from isaaclab.utils import configclass
@@ -105,13 +106,63 @@ class PreStepActionsRecorder(RecorderTerm):
 
 
 class PreStepFlatPolicyObservationsRecorder(RecorderTerm):
-    """Recorder term that records the policy group observations in each step."""
+    """Recorder term that records the policy group observations in each step.
+
+    With ``record_render_mask`` set (``run_episode(render_policy_steps_only=True)`` sets it), camera groups
+    that were not rendered for a step (:class:`~isaaclab.managers.UnrenderedObservationGroup`) are recorded
+    as all-zero rows of the group's shapes and dtypes, and ``obs/camera_rendered/<group>`` (bool per env)
+    records which rows hold a rendered frame. No frame of an earlier step is ever repeated. Without it, an
+    unrendered group raises.
+    """
 
     # obs_buf is read in pre-step, where it holds the observations returned by the previous step
     reads_step_observations = False
+    MASK_KEY = "camera_rendered"
+
+    def __init__(self, cfg: RecorderTermCfg, env):
+        super().__init__(cfg, env)
+        self.record_render_mask = False
+        # zero rows per camera group, shaped from its first rendered observation
+        self._unrendered_rows: dict = {}
+        self._rendered = None
+        self._not_rendered = None
 
     def record_pre_step(self):
-        return "obs", self._env.obs_buf
+        obs = self._env.obs_buf
+        if not self.record_render_mask:
+            unrendered = [name for name, value in obs.items() if isinstance(value, UnrenderedObservationGroup)]
+            if unrendered:
+                raise RuntimeError(
+                    f"Observation groups {unrendered} were not rendered for this step. Set record_render_mask to"
+                    " record them as zero rows with a camera_rendered mask."
+                )
+            return "obs", obs
+        if self.MASK_KEY in obs:
+            raise RuntimeError(f"An observation group is named '{self.MASK_KEY}', the render mask key.")
+        if self._rendered is None:
+            self._rendered = torch.ones(self._env.num_envs, dtype=torch.bool, device=self._env.device)
+            self._not_rendered = torch.zeros_like(self._rendered)
+        record, mask = {}, {}
+        for name in self._env.observation_manager.camera_groups:
+            value = obs[name]
+            if isinstance(value, UnrenderedObservationGroup):
+                if name not in self._unrendered_rows:
+                    raise RuntimeError(f"No rendered '{name}' observation was seen yet to size its zero rows.")
+                record[name] = self._unrendered_rows[name]
+                mask[name] = self._not_rendered
+            else:
+                if name not in self._unrendered_rows:
+                    self._unrendered_rows[name] = _zeros_like_group(value)
+                mask[name] = self._rendered
+        record = {name: record.get(name, value) for name, value in obs.items()}
+        record[self.MASK_KEY] = mask
+        return "obs", record
+
+
+def _zeros_like_group(value):
+    if isinstance(value, dict):
+        return {key: _zeros_like_group(item) for key, item in value.items()}
+    return torch.zeros_like(value)
 
 
 class PostStepEndEffectorPoseRecorder(RecorderTerm):

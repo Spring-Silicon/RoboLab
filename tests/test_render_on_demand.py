@@ -31,11 +31,16 @@ DECIMATION = 2
 
 
 class FramebufferCamera(Camera):
-    """A camera sensor whose image is the physics state at its last render."""
+    """A camera sensor whose image is the physics state at its last render with its render product enabled."""
 
     def __init__(self, num_envs):
         self.framebuffer = torch.full((num_envs,), -1.0)
         self.readbacks = 0
+        self.render_product_enabled = True
+        self.rendered_counters = []
+
+    def set_render_product_enabled(self, enabled):
+        self.render_product_enabled = enabled
 
     def __del__(self):
         pass
@@ -43,6 +48,8 @@ class FramebufferCamera(Camera):
 
 def camera_pixels(env, sensor_cfg: SceneEntityCfg):
     camera = env.scene.sensors[sensor_cfg.name]
+    if not camera.render_product_enabled:
+        raise RuntimeError("render product disabled")
     camera.readbacks += 1
     return camera.framebuffer.clone().unsqueeze(-1)
 
@@ -75,10 +82,24 @@ class ObservationsCfg:
     proprio_obs: ProprioObsCfg = ProprioObsCfg()
 
 
+@configclass
+class ViewportObsCfg(ObsGroup):
+    vp_pixels = ObsTerm(func=camera_pixels, params={"sensor_cfg": SceneEntityCfg("vp")})
+
+    def __post_init__(self):
+        self.enable_corruption = False
+        self.concatenate_terms = False
+
+
+@configclass
+class ViewportObservationsCfg(ObservationsCfg):
+    viewport_cam: ViewportObsCfg = ViewportObsCfg()
+
+
 class Scene:
-    def __init__(self, camera):
+    def __init__(self, cameras):
         self.num_envs = NUM_ENVS
-        self.sensors = {"cam": camera}
+        self.sensors = cameras
 
     def keys(self):
         return list(self.sensors)
@@ -113,7 +134,10 @@ class Sim:
 
     def render(self):
         self.env.render_counters.append(self.env._sim_step_counter)
-        self.env.scene.sensors["cam"].framebuffer = self.env.physics_state.clone()
+        for camera in self.env.scene.sensors.values():
+            if camera.render_product_enabled:
+                camera.framebuffer = self.env.physics_state.clone()
+                camera.rendered_counters.append(self.env._sim_step_counter)
 
 
 class SimulatedRobolabEnv(RobolabEnv):
@@ -121,13 +145,16 @@ class SimulatedRobolabEnv(RobolabEnv):
 
     max_episode_length = STEPS
 
-    def __init__(self):
+    def __init__(self, viewport=False):
         self._is_closed = True
         self.cfg = SimpleNamespace(
             decimation=DECIMATION, rerender_on_reset=True, sim=SimpleNamespace(dt=0.01, render_interval=DECIMATION)
         )
         self.sim = Sim(self)
-        self.scene = Scene(FramebufferCamera(NUM_ENVS))
+        cameras = {"cam": FramebufferCamera(NUM_ENVS)}
+        if viewport:
+            cameras["vp"] = FramebufferCamera(NUM_ENVS)
+        self.scene = Scene(cameras)
         self.physics_state = torch.zeros(NUM_ENVS)
         self.joint_target = torch.zeros(NUM_ENVS)
         self.render_counters = []
@@ -149,7 +176,7 @@ class SimulatedRobolabEnv(RobolabEnv):
             process_action=lambda action: processed.update(action=action),
             apply_action=lambda: self.joint_target.copy_(processed["action"][:, 0]),
         )
-        self.observation_manager = ObservationManager(ObservationsCfg(), self)
+        self.observation_manager = ObservationManager(ViewportObservationsCfg() if viewport else ObservationsCfg(), self)
         self._frozen_envs = torch.zeros(NUM_ENVS, dtype=torch.bool)
         self._pre_step_frozen = self._frozen_envs.clone()
         self._active_env_ids = tuple(range(NUM_ENVS))
@@ -173,7 +200,14 @@ class SimulatedRobolabEnv(RobolabEnv):
     @property
     def rendered_controls(self):
         """Control index of each render during stepping (reset renders excluded)."""
-        return [counter // DECIMATION - 1 for counter in self.render_counters if counter > 0]
+        return controls(self.render_counters)
+
+    def camera_rendered_controls(self, name):
+        return controls(self.scene.sensors[name].rendered_counters)
+
+
+def controls(render_counters):
+    return [counter // DECIMATION - 1 for counter in render_counters if counter > 0]
 
 
 class ChunkClient(InferenceClient):
@@ -210,8 +244,10 @@ class ChunkClient(InferenceClient):
         return np.array([[0.25 + 0.5 * self.step + 0.125 * i] for i in range(self.open_loop_horizon)])
 
 
-def run(client, **options):
-    env = SimulatedRobolabEnv()
+def run(client, viewport=False, setup=None, **options):
+    env = SimulatedRobolabEnv(viewport=viewport)
+    if setup is not None:
+        setup(env)
     env_cfg = SimpleNamespace(sim=env.cfg.sim, instruction="move", recorders=None)
     kwargs = {"headless": True, "save_videos": False, "video_mode": "none", **options}
     run_episode(env, env_cfg, 0, client, **kwargs)
@@ -280,5 +316,103 @@ def test_unrendered_camera_observations_fail_loudly():
     assert InferenceClient._find_obs_term(obs, "state") is obs["proprio_obs"]["state"]
     with pytest.raises(ValueError, match="require rendering"):
         env.step(action, render=False)
-    with pytest.raises(ValueError, match="video"):
-        run(ChunkClient(4), render_policy_steps_only=True, save_videos=True, video_mode="sensor")
+    with pytest.raises(ValueError, match="Not camera observation groups"):
+        env.step(action, camera_observations=("proprio_obs",))
+
+
+@pytest.fixture
+def video_frames(monkeypatch):
+    """Video frames written by run_episode, per video file name; each frame is the image value of one env."""
+    import robolab.eval.episode as episode
+
+    frames = {}
+
+    class Writer:
+        def __init__(self, path, fps):
+            self.frames = frames.setdefault(path, [])
+
+        def write(self, frame, take_ownership=False):
+            self.frames.append(float(frame))
+
+        def write_deferred(self, make_frame):
+            self.frames.append(float(make_frame()))
+
+        def release(self):
+            pass
+
+    monkeypatch.setattr(episode, "VideoWriter", Writer)
+    monkeypatch.setattr(episode, "get_output_dir", lambda: "out")
+    monkeypatch.setattr(episode, "camera_frame_sources", lambda obs, env_id: obs["image_obs"]["pixels"][env_id])
+    monkeypatch.setattr(episode, "combine_camera_frames", lambda sources, scale: sources)
+    monkeypatch.setattr(
+        episode, "unpack_viewport_cams", lambda obs, env_id: {"combined_image": obs["viewport_cam"]["vp_pixels"][env_id]}
+    )
+    return frames
+
+
+@pytest.mark.parametrize("video_mode", ["viewport", "sensor", "all"])
+@pytest.mark.parametrize("warmup", [0, 1])
+def test_video_cameras_render_every_step_and_other_cameras_only_for_consumed_steps(video_frames, video_mode, warmup):
+    default_client, client = ChunkClient(4), ChunkClient(4)
+    options = {"viewport": True, "save_videos": True, "video_mode": video_mode}
+    default_env = run(default_client, **options)
+    default_frames = dict(video_frames)
+    video_frames.clear()
+    env = run(client, render_policy_steps_only=True, render_warmup_steps=warmup, **options)
+
+    consumed = [c for c in consumed_controls(client) if c >= 0]
+    assert consumed == [3, 7, 11]
+    assert client.queries == default_client.queries
+    assert all(image == state for _, image, state in client.queries)
+    video_cameras = {"sensor": {"cam"}, "viewport": {"vp"}, "all": {"cam", "vp"}}[video_mode]
+    gated_controls = sorted({c - k for c in consumed for k in range(warmup + 1)})
+    for name in ("cam", "vp"):
+        expected = list(range(STEPS)) if name in video_cameras else gated_controls
+        assert env.camera_rendered_controls(name) == expected, name
+        # all render products are enabled again after the episode
+        assert env.scene.sensors[name].render_product_enabled
+    # every video frame shows the physics state after its step, exactly as when rendering every step
+    assert video_frames == default_frames and len(video_frames) == NUM_ENVS * len(video_cameras)
+    for path, frames in video_frames.items():
+        env_id = int(path.split("_env")[-1].split("_")[0].split(".")[0])
+        assert frames == [float(state[env_id]) for state, _ in env.trajectory]
+    for (state, proprio), (ref_state, ref_proprio) in zip(env.trajectory, default_env.trajectory):
+        assert torch.equal(state, ref_state) and torch.equal(proprio, ref_proprio)
+
+
+def test_recorded_policy_observations_mask_unrendered_groups(video_frames):
+    from robolab.core.events.basic_recorders import (
+        PreStepFlatPolicyObservationsRecorder,
+        PreStepFlatPolicyObservationsRecorderCfg,
+    )
+
+    rows = []
+    recorders = []
+
+    def add_recorder(env):
+        recorder = PreStepFlatPolicyObservationsRecorder(PreStepFlatPolicyObservationsRecorderCfg(), env)
+        env.recorder_manager._terms = {"record_policy_observations": recorder}
+        env.recorder_manager.record_pre_step = lambda: rows.append(recorder.record_pre_step()[1])
+        recorders.append(recorder)
+
+    client = ChunkClient(4)
+    env = run(
+        client, viewport=True, setup=add_recorder, render_policy_steps_only=True, save_videos=True, video_mode="viewport"
+    )
+
+    assert len(rows) == STEPS and not recorders[0].record_render_mask
+    consumed = set(consumed_controls(client))
+    states = [torch.zeros(NUM_ENVS)] + [state for state, _ in env.trajectory]
+    for step, row in enumerate(rows):
+        # the pre-step row of control `step` holds the observation returned by control `step - 1`
+        state = states[step]
+        rendered = step - 1 in consumed
+        assert row["camera_rendered"]["image_obs"].tolist() == [rendered] * NUM_ENVS
+        assert row["camera_rendered"]["viewport_cam"].tolist() == [True] * NUM_ENVS
+        assert torch.equal(row["image_obs"]["pixels"][:, 0], state if rendered else torch.zeros(NUM_ENVS))
+        assert torch.equal(row["viewport_cam"]["vp_pixels"][:, 0], state)
+        assert torch.equal(row["proprio_obs"]["state"][:, 0], state)
+
+    # without the mask (outside render_policy_steps_only), an unrendered group is an error, not a silent row
+    with pytest.raises(RuntimeError, match="not rendered"):
+        recorders[0].record_pre_step()
