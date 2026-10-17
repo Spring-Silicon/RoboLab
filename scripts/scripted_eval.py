@@ -31,6 +31,11 @@ from robolab.eval.runner import add_common_eval_args, run_evaluation  # noqa: E4
 
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument("--timing-output", required=True, help="Path of the timing JSON to write.")
+parser.add_argument(
+    "--settings-dump",
+    default=None,
+    help="Folder for full carb settings snapshots per task (TASK.create.json after create, TASK.close.json before close).",
+)
 add_common_eval_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
@@ -55,14 +60,27 @@ _create_env = runtime.create_env
 _close_env = RobolabEnv.close
 
 
+def dump_settings(scene, stage):
+    if args.settings_dump is None:
+        return
+    import carb.settings
+
+    os.makedirs(args.settings_dump, exist_ok=True)
+    tree = carb.settings.get_settings().get_settings_dictionary("/").get_dict()
+    with open(os.path.join(args.settings_dump, f"{scene}.{stage}.json"), "w") as f:
+        json.dump(tree, f, indent=1, sort_keys=True, default=repr)
+
+
 def timed_create_env(scene, **kwargs):
     start = time.perf_counter()
     env, env_cfg = _create_env(scene, **kwargs)
     task_records.append({"task": scene, "start_s": start - T0, "create_s": time.perf_counter() - start})
+    dump_settings(scene, "create")
     return env, env_cfg
 
 
 def timed_close(self):
+    dump_settings(task_records[-1]["task"], "close")
     start = time.perf_counter()
     _close_env(self)
     end = time.perf_counter()
