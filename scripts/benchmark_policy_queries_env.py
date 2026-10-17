@@ -121,6 +121,28 @@ def sha(array):
     return hashlib.sha256(np.ascontiguousarray(array).tobytes()).hexdigest()
 
 
+def write_measurement(records, complete):
+    """Write ``measurement.json``; after each episode, so a timeout keeps the finished episodes."""
+    payload = {
+        "benchmark": "policy_queries_env",
+        "config": {key: value for key, value in vars(args).items() if isinstance(value, (int, float, str, list))},
+        "query_modes_available": has_modes,
+        "torch_num_threads": torch.get_num_threads(),
+        "complete": complete,
+        "episodes": records,
+        # "passed": every checked env-step applied the serial-loop action and control count.
+        "serial_verification": (
+            "off" if not args.verify_serial
+            else "passed" if all(r["serial_mismatched_env_steps"] == 0 and r["serial_verified_steps"] > 0
+                                 for r in records)
+            else "failed"
+        ),
+    }
+    (out / "measurement.json").write_text(json.dumps(payload, indent=2, default=str))
+    return payload
+
+
+
 out = Path(args.output)
 out.mkdir(parents=True, exist_ok=False)
 set_output_dir(str(out))
@@ -131,6 +153,7 @@ env = None
 records = []
 try:
     env, env_cfg = create_env(args.task, num_envs=args.num_envs, seed=0, device=args.device)
+    print(f"PQ_ENV_CREATED num_envs={args.num_envs} device={args.device}", flush=True)
     has_modes = hasattr(mock.InferenceClient, "configure_queries")
     reference = None
     for index, mode in enumerate(args.modes):
@@ -169,23 +192,12 @@ try:
         records.append(record)
         print(f"EPISODE {index} {mode}->{effective}: {episode_s:.2f} s, {len(actions)} steps, "
               f"actions_equal_first={record['actions_equal_first']} joints_equal_first={record['joints_equal_first']} "
-              f"serial_mismatches={client.mismatches}/{client.verified_steps} steps",
+              f"serial_mismatches={client.mismatches}/{client.verified_steps} steps "
+              f"policy_s={timing.get('policy_inference_s', float('nan')):.2f} "
+              f"env_step_s={timing.get('env_step_s', float('nan')):.2f}",
               flush=True)
-    payload = {
-        "benchmark": "policy_queries_env",
-        "config": {key: value for key, value in vars(args).items() if isinstance(value, (int, float, str, list))},
-        "query_modes_available": has_modes,
-        "torch_num_threads": torch.get_num_threads(),
-        "episodes": records,
-        # "passed": every checked env-step applied the serial-loop action and control count.
-        "serial_verification": (
-            "off" if not args.verify_serial
-            else "passed" if all(r["serial_mismatched_env_steps"] == 0 and r["serial_verified_steps"] > 0
-                                 for r in records)
-            else "failed"
-        ),
-    }
-    (out / "measurement.json").write_text(json.dumps(payload, indent=2, default=str))
+        write_measurement(records, complete=False)
+    payload = write_measurement(records, complete=True)
     print("PQ_ENV_RESULT", json.dumps({r["mode"] + str(r["index"]): round(r["episode_s"], 3) for r in records}),
           f"serial_verification={payload['serial_verification']}", flush=True)
 except BaseException:
