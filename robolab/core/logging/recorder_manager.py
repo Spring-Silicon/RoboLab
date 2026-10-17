@@ -17,38 +17,20 @@ from robolab.core.logging.streaming_hdf5_handler import StreamingHDF5DatasetFile
 logger = logging.getLogger(__name__)
 
 
+def _collect_tensor_leaves(key: str, value, leaves: list) -> bool:
+    """Append ``(path, tensor)`` for every leaf of a nested recorder value; False if a leaf is not a tensor."""
+    if isinstance(value, dict):
+        return all(_collect_tensor_leaves(f"{key}/{sub_key}", sub_value, leaves) for sub_key, sub_value in value.items())
+    if isinstance(value, torch.Tensor):
+        leaves.append((key, value))
+        return True
+    return False
+
+
 def get_memory_usage_mb() -> float:
     """Get current process memory usage in MB."""
     process = psutil.Process()
     return process.memory_info().rss / (1024 * 1024)
-
-
-# torch has no advanced-indexing ("index"/"index_cuda") kernel for the wider
-# unsigned integer dtypes on either CPU or CUDA, so `tensor[env_ids]` raises
-# e.g. `RuntimeError: "index_cuda" not implemented for 'UInt16'` (seen on the
-# IsaacSim 5.1 stack for the uint16 subtask status codes recorded under
-# --enable-subtask; also fails on CPU with the same torch-cu128 build). Cast
-# such tensors to int64 for the gather, then restore the original dtype.
-_UNINDEXABLE_DTYPES = tuple(
-    dt for dt in (getattr(torch, name, None) for name in ("uint16", "uint32", "uint64"))
-    if dt is not None
-)
-
-
-def _slice_to_envs(value, env_ids):
-    """Slice a recorder-term value (tensor or nested dict of tensors) to a subset of envs.
-
-    Terms emit values shaped (num_envs, ...). add_to_episodes uses positional indexing
-    on the leading axis, so when forwarding only a subset of rows we need the leading
-    dim aligned with env_ids.
-    """
-    if isinstance(value, dict):
-        return {k: _slice_to_envs(v, env_ids) for k, v in value.items()}
-    if isinstance(value, torch.Tensor):
-        if value.dtype in _UNINDEXABLE_DTYPES:
-            return value.to(torch.int64)[env_ids].to(value.dtype)
-        return value[env_ids]
-    return value
 
 
 def get_episode_data_size(episode: EpisodeData) -> dict:
@@ -103,6 +85,10 @@ class RobolabRecorderManager(RecorderManager):
         # Track streaming state per environment
         self._streaming_active: dict[int, bool] = {}
 
+        # Per-control recorder outputs not yet split into per-env EpisodeData (see _buffer_step_rows)
+        self._pending_rows: dict[str, list[torch.Tensor]] = {}
+        self._pending_env_ids: tuple[int, ...] = ()
+
         # Do nothing if cfg is None or an empty dict
         if not cfg:
             return
@@ -119,7 +105,7 @@ class RobolabRecorderManager(RecorderManager):
             raise TypeError("Configuration for the recorder manager is not of type RecorderManagerBaseCfg.")
 
         # create episode data buffer indexed by environment id
-        self._episodes: dict[int, EpisodeData] = dict()
+        self._episodes = dict()
         for env_id in range(env.num_envs):
             self._episodes[env_id] = EpisodeData()
             self._streaming_active[env_id] = False
@@ -149,6 +135,98 @@ class RobolabRecorderManager(RecorderManager):
         self._auto_flush_verbose: bool = False  # Print diagnostics on auto-flush
 
         self.initialized = True
+
+    @property
+    def _episodes(self) -> dict[int, EpisodeData]:
+        """Per-env episode buffers, including every recorded control.
+
+        Step rows buffered by :meth:`_buffer_step_rows` are moved into the buffers before
+        any access, so every reader and writer (flush, export, reset callbacks,
+        :meth:`get_episode`) sees exactly the data per-step accumulation would have built.
+        """
+        if self._pending_rows:
+            self._materialize_pending_rows()
+        return self._episode_store
+
+    @_episodes.setter
+    def _episodes(self, episodes: dict[int, EpisodeData]) -> None:
+        self._episode_store = episodes
+
+    def _buffer_step_rows(self, key: str, value, env_ids: Sequence[int]) -> None:
+        """Record one control's full-batch term output for ``env_ids``.
+
+        Instead of one ``EpisodeData.add`` per env and leaf per control, each tensor leaf is
+        snapshotted once per control (sources may be reused simulator buffers). The per-env
+        rows are split off and appended in one operation per env and leaf when the episode
+        buffers are next accessed, or when the recorded env set changes. Values, dtypes,
+        shapes and row order are those of :meth:`_add_full_batch_to_episodes`.
+        """
+        leaves: list[tuple[str, torch.Tensor]] = []
+        if not _collect_tensor_leaves(key, value, leaves):
+            self._add_full_batch_to_episodes(key, value, env_ids)
+            return
+        env_ids = tuple(env_ids)
+        if self._pending_rows and env_ids != self._pending_env_ids:
+            self._materialize_pending_rows()
+        self._pending_env_ids = env_ids
+        for leaf_key, leaf in leaves:
+            self._pending_rows.setdefault(leaf_key, []).append(leaf.clone())
+
+    def _materialize_pending_rows(self) -> None:
+        """Append buffered step rows to the per-env episode buffers, in recording order."""
+        pending, self._pending_rows = self._pending_rows, {}
+        env_ids = self._pending_env_ids
+        # same row selection as _add_full_batch_to_episodes
+        select_rows = len(env_ids) < self._env.num_envs
+        episodes = self._episode_store
+        for key, snapshots in pending.items():
+            steps = torch.stack(snapshots)  # (controls, num_envs, ...)
+            *groups, leaf_name = key.split("/")
+            for value_index, env_id in enumerate(env_ids):
+                episode = episodes.get(env_id)
+                if episode is None:
+                    episode = episodes[env_id] = EpisodeData()
+                    episode.env_id = env_id
+                rows = steps[:, env_id if select_rows else value_index]
+                node = episode.data
+                for group in groups:
+                    node = node.setdefault(group, {})
+                if leaf_name in node:
+                    node[leaf_name] = torch.cat((node[leaf_name], rows))
+                else:
+                    node[leaf_name] = rows.clone(memory_format=torch.contiguous_format)
+
+    def _add_full_batch_to_episodes(self, key: str, value, env_ids: Sequence[int]) -> None:
+        """Record selected full-batch rows without allocating an intermediate gather.
+
+        EpisodeData.add owns the snapshot copy. Scalar row selection also works
+        for uint16/uint32/uint64 on CPU and CUDA, unlike advanced indexing.
+        Reset callbacks still use upstream add_to_episodes: their values are
+        already subset-shaped, not indexed by global environment ID.
+        """
+        if isinstance(value, dict):
+            for sub_key, sub_value in value.items():
+                self._add_full_batch_to_episodes(f"{key}/{sub_key}", sub_value, env_ids)
+            return
+        # Match the existing positional contract for non-tensor leaves and
+        # full-batch exports; only subset tensor payloads need global row IDs.
+        select_rows = isinstance(value, torch.Tensor) and len(env_ids) < self._env.num_envs
+        for value_index, env_id in enumerate(env_ids):
+            if env_id not in self._episodes:
+                self._episodes[env_id] = EpisodeData()
+                self._episodes[env_id].env_id = env_id
+            self._episodes[env_id].add(key, value[env_id if select_rows else value_index])
+
+    def set_success_to_episodes(self, env_ids: Sequence[int] | None, success_values: torch.Tensor):
+        """Transfer success flags together rather than synchronizing once per env."""
+        if not self.active_terms:
+            return
+        if env_ids is None:
+            env_ids = range(self._env.num_envs)
+        elif isinstance(env_ids, torch.Tensor):
+            env_ids = env_ids.tolist()
+        for env_id, success in zip(env_ids, success_values.reshape(-1).tolist()):
+            self._episodes[env_id].success = success
 
     def get_term(self, term_type: type) -> object | None:
         """Return the first active recorder term of the given type, or None.
@@ -265,7 +343,7 @@ class RobolabRecorderManager(RecorderManager):
 
         return info
 
-    def _active_env_ids(self) -> list[int]:
+    def _active_env_ids(self) -> Sequence[int]:
         """Env ids that are still actively recording.
 
         Frozen envs have already had their demo finalized via export_episodes;
@@ -281,6 +359,9 @@ class RobolabRecorderManager(RecorderManager):
         Falls back to all envs if the env doesn't expose ``_frozen_envs`` — matches
         upstream RecorderManager behavior for non-RobolabEnv subclasses.
         """
+        active_ids = getattr(self._env, "_active_env_ids", None)
+        if active_ids is not None:
+            return active_ids
         frozen = getattr(self._env, "_frozen_envs", None)
         if frozen is None:
             return list(range(self._env.num_envs))
@@ -298,15 +379,11 @@ class RobolabRecorderManager(RecorderManager):
         if not active:
             return
 
-        needs_slice = len(active) < self._env.num_envs
-
         for term in self._terms.values():
             key, value = term.record_pre_step()
             if key is None:
                 continue
-            if needs_slice:
-                value = _slice_to_envs(value, active)
-            self.add_to_episodes(key, value, env_ids=active)
+            self._buffer_step_rows(key, value, active)
 
     def record_post_step(self) -> None:
         """Trigger recorder terms for post-step functions with auto-flush support.
@@ -320,15 +397,11 @@ class RobolabRecorderManager(RecorderManager):
         if not active:
             return
 
-        needs_slice = len(active) < self._env.num_envs
-
         for term in self._terms.values():
             key, value = term.record_post_step()
             if key is None:
                 continue
-            if needs_slice:
-                value = _slice_to_envs(value, active)
-            self.add_to_episodes(key, value, env_ids=active)
+            self._buffer_step_rows(key, value, active)
 
         if self._flush_interval > 0:
             for env_id in active:
@@ -365,17 +438,9 @@ class RobolabRecorderManager(RecorderManager):
 
         super().record_pre_reset(env_ids, force_export_or_skip=force_export_or_skip)
 
-        # Override upstream's HDF5 success flag with the authoritative signal.
-        #
-        # Upstream RecorderManager.record_pre_reset derives demo `success` from a
-        # termination term literally named "success". Tasks using the per-object
-        # `success_<obj>` any-of-N pattern (e.g. GrabABagelTask, GrabAFruitTask)
-        # have no such term, so upstream silently records success=False even when
-        # an episode genuinely succeeded. Re-derive from termination_manager.terminated
-        # (the OR of all non-timeout terms) — the same signal env.py uses for the
-        # canonical jsonl — so the HDF5 attr is correct regardless of term naming.
-        # set_success_to_episodes only updates in-memory EpisodeData.success; export
-        # runs later (env.py _reset_idx), so this re-set is picked up on write.
+        # Preserve upstream's optional export ordering, then override the
+        # in-memory success flag with the OR of all non-timeout terms. This
+        # supports success_<obj> tasks when export follows in env._reset_idx.
         if hasattr(self._env, "termination_manager"):
             success = self._env.termination_manager.terminated[env_ids]
             self.set_success_to_episodes(env_ids, success)
@@ -520,19 +585,12 @@ class RobolabRecorderManager(RecorderManager):
         if not self._hdf5_initialized:
             self._ensure_hdf5_handler()
 
-        # Record final status for incomplete tasks BEFORE exporting. Scoped to
-        # env_ids being exported — record_final_status returns data for all envs
-        # by convention, so without slicing we'd append a "subtask" entry to
-        # every env's _episodes on every per-env export call, leaking into the
-        # buffers of envs already finalized in prior export_episodes calls.
-        needs_slice = len(env_ids) < self._env.num_envs
+        # Final-status terms return full batches; append only the exported rows.
         for term in self._terms.values():
             if hasattr(term, 'record_final_status'):
                 key, value = term.record_final_status()
                 if key is not None and value is not None:
-                    if needs_slice:
-                        value = _slice_to_envs(value, env_ids)
-                    self.add_to_episodes(key, value, env_ids=env_ids)
+                    self._add_full_batch_to_episodes(key, value, env_ids)
 
         # Get export mode from config
         cfg: RecorderManagerBaseCfg = self.cfg  # type: ignore

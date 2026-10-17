@@ -16,6 +16,7 @@ from robolab.core.task.subtask_state_machine import SubtaskStateMachine
 
 
 class SubtaskCompletionRecorderTerm(RecorderTerm):
+    reads_step_observations = False
     subtasks: list[dict[str, Any]] | None = None
 
     def __init__(self, cfg, env):
@@ -111,6 +112,21 @@ class SubtaskCompletionRecorderTerm(RecorderTerm):
             verbose=robolab.constants.VERBOSE,
         )
 
+        # Host view of effective_frozen. RobolabEnv mirrors its frozen masks in host
+        # active-ID tuples (frozen now and before this step <=> in neither tuple).
+        active_now = getattr(self._env, "_active_env_ids", None)
+        active_before = getattr(self._env, "_pre_step_active_env_ids", None)
+        if active_now is not None and active_before is not None:
+            skip_env = [eid not in active_now and eid not in active_before for eid in range(self._num_envs)]
+        else:
+            skip_env = effective_frozen.tolist()
+        # one transfer per event mask and for all episode lengths, not one per env
+        event_env_masks = [env_mask.tolist() for _, _, env_mask in all_events]
+        try:
+            step_indices = [int(length) for length in self._env.episode_length_buf.tolist()]
+        except Exception:
+            step_indices = [-1] * self._num_envs
+
         # Step each non-frozen env's state machine with its filtered events
         status_list = []
         completed_list = []
@@ -118,7 +134,7 @@ class SubtaskCompletionRecorderTerm(RecorderTerm):
         any_info = False
 
         for eid in range(self._num_envs):
-            if effective_frozen[eid]:
+            if skip_env[eid]:
                 # Use last known values for previously-frozen envs
                 status_list.append(self.infos[eid]["status"])
                 completed_list.append(self.infos[eid]["completed"])
@@ -128,7 +144,7 @@ class SubtaskCompletionRecorderTerm(RecorderTerm):
             # Filter events for this env: keep (info, status) where env_mask[eid] is True
             env_events = [
                 (info_str, status_code)
-                for info_str, status_code, env_mask in all_events
+                for (info_str, status_code, _), env_mask in zip(all_events, event_env_masks)
                 if env_mask[eid]
             ]
 
@@ -145,13 +161,10 @@ class SubtaskCompletionRecorderTerm(RecorderTerm):
 
             # Emit v2 events: tracker firings + SM transitions, all tagged with
             # this step's post-update score.
-            try:
-                step_idx = int(self._env.episode_length_buf[eid].item())
-            except Exception:
-                step_idx = -1
+            step_idx = step_indices[eid]
             current_score = float(subtask_state["score"])
 
-            for tracker_info, tracker_code, env_mask in all_events:
+            for (tracker_info, tracker_code, _), env_mask in zip(all_events, event_env_masks):
                 if env_mask[eid]:
                     code_int = int(tracker_code)
                     self._events[eid].append({

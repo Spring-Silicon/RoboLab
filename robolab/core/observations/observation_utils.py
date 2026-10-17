@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import threading
 from typing import Any, List
 
 import isaaclab.envs.mdp as mdp
@@ -28,6 +29,64 @@ def _image_observation_func():
     if image_func is None:
         raise AttributeError("IsaacLab image observation function not found")
     return image_func
+
+
+def camera_image(
+    env: Any,
+    sensor_cfg: SceneEntityCfg,
+    data_type: str = "rgb",
+    normalize: bool = True,
+    allow_missing: bool = False,
+) -> torch.Tensor:
+    """Image observation term; unnormalized images borrow the sensor buffer.
+
+    ObservationManager copies term outputs before publishing or modifying them,
+    so an additional full image clone inside the term is unnecessary. Callers
+    using this function outside the manager must copy before retaining or
+    modifying an unnormalized image. Normalization uses Isaac Lab's image
+    implementation unchanged. ``allow_missing`` retains :func:`image_safe`'s
+    correctly shaped initial output before a depth annotator is populated.
+
+    On CPU, a camera's ``rgb`` output is a strided view of its ``rgba`` buffer;
+    that view is packed into a new contiguous tensor with the same values, which
+    is several times faster than the manager's element-wise strided copy.
+    """
+    if allow_missing and data_type not in env.scene.sensors[sensor_cfg.name].data.output:
+        return image_safe(env, sensor_cfg=sensor_cfg, data_type=data_type, normalize=normalize)
+    if not normalize:
+        output = env.scene.sensors[sensor_cfg.name].data.output
+        image = output[data_type]
+        if data_type == "rgb" and image.device.type == "cpu" and not image.is_contiguous():
+            packed = _pack_rgb_view(output.get("rgba"), image)
+            if packed is not None:
+                return packed
+        return image
+    return _image_observation_func()(
+        env, sensor_cfg=sensor_cfg, data_type=data_type, normalize=normalize
+    )
+
+
+def _pack_rgb_view(rgba: torch.Tensor | None, rgb: torch.Tensor) -> torch.Tensor | None:
+    """Contiguous copy of ``rgb`` when it is exactly ``rgba[..., :3]`` of a contiguous uint8 CPU buffer."""
+    if (
+        rgba is None
+        or rgba.dtype != torch.uint8
+        or rgb.dtype != torch.uint8
+        or rgba.device.type != "cpu"
+        or not rgba.is_contiguous()
+        or rgba.ndim != 4
+        or rgba.shape[-1] != 4
+        or rgb.shape != rgba.shape[:-1] + (3,)
+        or rgb.data_ptr() != rgba.data_ptr()
+        or rgb.stride() != rgba.stride()
+    ):
+        return None
+    import cv2
+
+    packed = torch.empty(rgb.shape, dtype=torch.uint8)
+    for env_index in range(rgba.shape[0]):
+        cv2.cvtColor(rgba[env_index].numpy(), cv2.COLOR_RGBA2RGB, dst=packed[env_index].numpy())
+    return packed
 
 
 def image_safe(
@@ -179,7 +238,7 @@ def generate_image_obs_from_cameras(camera_cfgs: List[Any] | Any):
                 # if hasattr(attr_value, 'prim_path'):
                     camera_name = attr_name
                     obs_terms[camera_name] = ObsTerm(
-                        func=_image_observation_func(),
+                        func=camera_image,
                         params={
                             "sensor_cfg": SceneEntityCfg(camera_name),
                             "data_type": "rgb",
@@ -192,11 +251,12 @@ def generate_image_obs_from_cameras(camera_cfgs: List[Any] | Any):
                     # (per-env, recorded like any other term).
                     if "depth" in attr_value.data_types:
                         obs_terms[f"{camera_name}_depth"] = ObsTerm(
-                            func=image_safe,
+                            func=camera_image,
                             params={
                                 "sensor_cfg": SceneEntityCfg(camera_name),
                                 "data_type": "depth",
                                 "normalize": False,
+                                "allow_missing": True,
                             }
                         )
                         for term_suffix, term_func in (
@@ -277,23 +337,12 @@ def unpack_image_obs(obs, obs_group_name="image_obs", camera_suffix=["_camera", 
     Returns:
         Dictionary containing the unpacked image observations
     """
-    import torch.nn.functional as F
-
     images = []
     image_dict = {}
     for key, value in obs[obs_group_name].items():
         if any(key.endswith(suffix) for suffix in camera_suffix):
-            tensor = value[env_id].detach()
-
             # Resize on GPU before CPU transfer (much faster for small scale values)
-            if scale != 1.0:
-                # tensor shape is (H, W, C), need (1, C, H, W) for interpolate
-                # Convert to float for interpolate, then back to uint8
-                original_dtype = tensor.dtype
-                tensor = tensor.permute(2, 0, 1).unsqueeze(0).float()
-                tensor = F.interpolate(tensor, scale_factor=scale, mode='bilinear', align_corners=False)
-                tensor = tensor.squeeze(0).permute(1, 2, 0).to(original_dtype)
-
+            tensor = _resize_image(value[env_id].detach(), scale)
             image = tensor.cpu().numpy()
             image_dict[key] = image
             images.append(image)
@@ -318,6 +367,115 @@ def unpack_proprio_obs(obs, obs_group_name="proprio_obs", env_id: int = 0):
         proprio_dict[key] = value[env_id].clone().detach().cpu().numpy()
     return proprio_dict
 
+def _resize_image(tensor: torch.Tensor, scale: float) -> torch.Tensor:
+    """Bilinear resize of (..., H, W, C) images, as ``F.interpolate(align_corners=False)`` then a cast back.
+
+    For uint8 images halved along even dimensions, every output pixel samples source
+    coordinate 2i + 0.5 with weights 0.5/0.5, so the float result is exactly the mean of a
+    2x2 block (all intermediates are multiples of 0.25 below 256) and the cast truncates it.
+    That case is computed with integer adds and a shift, bit-identical to the float path.
+    """
+    if scale == 1.0:
+        return tensor
+    height, width = tensor.shape[-3], tensor.shape[-2]
+    if scale == 0.5 and tensor.dtype == torch.uint8 and height % 2 == 0 and width % 2 == 0:
+        total = tensor[..., 0::2, 0::2, :].to(torch.int16)
+        total += tensor[..., 0::2, 1::2, :]
+        total += tensor[..., 1::2, 0::2, :]
+        total += tensor[..., 1::2, 1::2, :]
+        return total.bitwise_right_shift_(2).to(torch.uint8)
+    import torch.nn.functional as F
+
+    # tensor shape is (..., H, W, C), need (N, C, H, W) for interpolate
+    # Convert to float for interpolate, then back to the original dtype
+    original_dtype = tensor.dtype
+    images = tensor.reshape(-1, *tensor.shape[-3:])
+    resized = F.interpolate(images.permute(0, 3, 1, 2).float(), scale_factor=scale,
+                            mode='bilinear', align_corners=False)
+    resized = resized.permute(0, 2, 3, 1).to(original_dtype)
+    return resized.reshape(*tensor.shape[:-3], *resized.shape[-3:])
+
+
+def unpack_combined_frames(obs, env_ids: list[int], obs_group_name="image_obs",
+                           camera_suffix=["_camera", "_cam", "_img", "_image"], scale: float = 1.0) -> np.ndarray:
+    """``unpack_image_obs(obs, ...)["combined_image"]`` for several envs at once.
+
+    Resizes all selected envs together and transfers them to the host once. Returns a
+    new (len(env_ids), H, W_total, C) array whose row ``i`` equals the combined image of
+    ``env_ids[i]``.
+    """
+    images = []
+    for key, value in obs[obs_group_name].items():
+        if any(key.endswith(suffix) for suffix in camera_suffix):
+            selected = value if list(env_ids) == list(range(value.shape[0])) else value[env_ids]
+            images.append(_resize_image(selected.detach(), scale))
+    return torch.cat(images, dim=2).cpu().numpy()
+
+
+def camera_frame_sources(obs, env_id: int, obs_group_name="image_obs",
+                         camera_suffix=["_camera", "_cam", "_img", "_image"]) -> list[torch.Tensor]:
+    """The camera images that ``unpack_image_obs(obs, ..., env_id=env_id)`` combines, in the same order.
+
+    Returns views of the observation tensors, not copies. Pass them to
+    :func:`combine_camera_frames` to obtain the same ``combined_image``.
+    """
+    return [
+        value[env_id].detach()
+        for key, value in obs[obs_group_name].items()
+        if any(key.endswith(suffix) for suffix in camera_suffix)
+    ]
+
+
+def _half_scale_concat(images: List[torch.Tensor]) -> torch.Tensor:
+    """Exact 2x2 integer mean of each (H, W, C) uint8 image (even H, W), concatenated along the width.
+
+    Same arithmetic as :func:`_resize_image`'s integer path: the 2x2 sum in int16, shifted right by 2.
+    """
+    halves: List[torch.Tensor] = []
+    for image in images:
+        height = image.shape[0] // 2
+        width = image.shape[1] // 2
+        channels = image.shape[2]
+        pixel_pairs = image.reshape(height, 2, width, 2 * channels)
+        row_sums = pixel_pairs[:, 0].to(torch.int16) + pixel_pairs[:, 1]
+        block_sums = row_sums[:, :, :channels] + row_sums[:, :, channels:]
+        halves.append(block_sums.bitwise_right_shift(2).to(torch.uint8))
+    return torch.cat(halves, dim=1)
+
+
+_half_scale_concat_scripted = None
+_half_scale_concat_lock = threading.Lock()
+
+
+def _scripted_half_scale_concat():
+    """:func:`_half_scale_concat` compiled once with TorchScript, which runs it without holding the GIL."""
+    global _half_scale_concat_scripted
+    with _half_scale_concat_lock:
+        if _half_scale_concat_scripted is None:
+            _half_scale_concat_scripted = torch.jit.script(_half_scale_concat)
+        return _half_scale_concat_scripted
+
+
+def combine_camera_frames(images: list[torch.Tensor], scale: float = 1.0) -> np.ndarray:
+    """``unpack_image_obs(...)["combined_image"]`` from one env's (H, W, C) camera images.
+
+    Returns a new array; the inputs are only read. Intended for video writer threads:
+    halving host uint8 images with even dimensions (the sensor-video case) is a single
+    TorchScript call that does not hold the GIL, so it does not stall the simulation
+    thread. Other inputs use :func:`_resize_image` per image.
+    """
+    if scale == 0.5 and images and all(
+        image.dtype == torch.uint8
+        and image.device.type == "cpu"
+        and image.ndim == 3
+        and image.shape[0] % 2 == 0
+        and image.shape[1] % 2 == 0
+        for image in images
+    ):
+        return _scripted_half_scale_concat()(images).numpy()
+    return torch.cat([_resize_image(image, scale) for image in images], dim=1).cpu().numpy()
+
+
 def unpack_viewport_cams(obs, obs_group_name="viewport_cam", camera_suffix=["_camera", "_cam", "_img", "_image"], scale: float = 1.0, env_id: int = 0):
     """
     Unpack viewport camera observations from an observation dictionary.
@@ -333,23 +491,12 @@ def unpack_viewport_cams(obs, obs_group_name="viewport_cam", camera_suffix=["_ca
     Returns:
         Dictionary containing the unpacked viewport camera observations
     """
-    import torch.nn.functional as F
-
     images = []
     viewport_dict = {}
     for key, value in obs[obs_group_name].items():
         if any(key.endswith(suffix) for suffix in camera_suffix):
-            tensor = value[env_id].detach()
-
             # Resize on GPU before CPU transfer (much faster for small scale values)
-            if scale != 1.0:
-                # tensor shape is (H, W, C), need (1, C, H, W) for interpolate
-                # Convert to float for interpolate, then back to uint8
-                original_dtype = tensor.dtype
-                tensor = tensor.permute(2, 0, 1).unsqueeze(0).float()
-                tensor = F.interpolate(tensor, scale_factor=scale, mode='bilinear', align_corners=False)
-                tensor = tensor.squeeze(0).permute(1, 2, 0).to(original_dtype)
-
+            tensor = _resize_image(value[env_id].detach(), scale)
             image = tensor.cpu().numpy()
             viewport_dict[key] = image
             images.append(image)

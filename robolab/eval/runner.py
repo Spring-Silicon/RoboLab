@@ -93,6 +93,16 @@ def add_common_eval_args(parser: argparse.ArgumentParser) -> None:
                         choices=["all", "viewport", "sensor", "none"],
                         help=("Which videos to save: 'all' (sensor + viewport), "
                               "'viewport' only, 'sensor' only, or 'none' (default: all)."))
+    parser.add_argument("--render-policy-steps-only", "--render_policy_steps_only", action="store_true",
+                        help=("Render cameras and compute image observations only on control steps whose "
+                              "observation the client queries its policy with (action-chunking clients "
+                              "with open_loop_horizon > 1). Physics, non-image observations, recorders and "
+                              "success checks still run every step. Requires --video-mode none."))
+    parser.add_argument("--render-warmup-steps", "--render_warmup_steps", type=int, default=0,
+                        help=("With --render-policy-steps-only, also render (without camera read-back) this "
+                              "many steps before each consumed step, so RTX temporal history matches rendering "
+                              "every step more closely; >= open_loop_horizon - 1 renders every step and gives "
+                              "the default pixels (default: 0)."))
     parser.add_argument("--renderer", type=str, default="realtime",
                         choices=["realtime", "pathtracing"],
                         help=("RTX renderer mode (default: realtime). 'realtime' uses "
@@ -110,6 +120,13 @@ def add_common_eval_args(parser: argparse.ArgumentParser) -> None:
                               "RenderCfg.rendering_mode). Default: unset, which lets "
                               "IsaacLab fall back to 'balanced'. No effect under "
                               "--renderer pathtracing."))
+    # Forwarded to Isaac Sim's SimulationApp config key of the same name through
+    # AppLauncher (like --renderer). It sizes Kit's carb.tasking and TBB worker pools.
+    parser.add_argument("--limit-cpu-threads", "--limit_cpu_threads", type=int, default=4,
+                        help=("Kit worker-thread pool size (Isaac Sim 'limit_cpu_threads', default 32 there). "
+                              "An eval process keeps only a few workers busy and idle default pools spin "
+                              "several extra cores, so 4 keeps step time while letting more processes "
+                              "share a machine. Only thread scheduling changes."))
 
 
 def run_evaluation(
@@ -133,6 +150,10 @@ def run_evaluation(
             ``args``. Called once per task; the client is reused across runs
             within a task.
     """
+    if args.render_policy_steps_only and args.video_mode != "none":
+        raise ValueError("--render-policy-steps-only requires --video-mode none")
+    if args.render_warmup_steps and not args.render_policy_steps_only:
+        raise ValueError("--render-warmup-steps requires --render-policy-steps-only")
     import os
 
     import robolab.constants
@@ -263,6 +284,8 @@ def run_evaluation(
                 video_mode=args.video_mode,
                 headless=args.headless,
                 enable_gt_state=args.enable_gt_state,
+                render_policy_steps_only=args.render_policy_steps_only,
+                render_warmup_steps=args.render_warmup_steps,
             )
 
             episode_results = summarize_run(

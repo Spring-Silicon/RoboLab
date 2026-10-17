@@ -20,6 +20,7 @@ class InitialStateRecorder(RecorderTerm):
     This includes scene state (articulations, rigid objects) and optionally camera
     extrinsics (position and orientation) under the 'cameras' key.
     """
+    reads_step_observations = False
     initial_state = None
 
     def __init__(self, cfg: "InitialStateRecorderCfg", env):
@@ -88,6 +89,8 @@ class InitialStateRecorder(RecorderTerm):
 class PostStepStatesRecorder(RecorderTerm):
     """Recorder term that records the state of the environment at the end of each step."""
 
+    reads_step_observations = False
+
     def record_post_step(self):
         return "states", self._env.scene.get_state(is_relative=True)
 
@@ -95,12 +98,17 @@ class PostStepStatesRecorder(RecorderTerm):
 class PreStepActionsRecorder(RecorderTerm):
     """Recorder term that records the actions in the beginning of each step."""
 
+    reads_step_observations = False
+
     def record_pre_step(self):
         return "actions", self._env.action_manager.action
 
 
 class PreStepFlatPolicyObservationsRecorder(RecorderTerm):
     """Recorder term that records the policy group observations in each step."""
+
+    # obs_buf is read in pre-step, where it holds the observations returned by the previous step
+    reads_step_observations = False
 
     def record_pre_step(self):
         return "obs", self._env.obs_buf
@@ -117,6 +125,8 @@ class PostStepEndEffectorPoseRecorder(RecorderTerm):
     articulation's root link), matching the ``ee_pos``/``ee_quat`` observation terms
     (see docs/frames.md). Velocities remain on world axes.
     """
+
+    reads_step_observations = False
 
     def __init__(self, cfg: "PostStepEndEffectorPoseRecorderCfg", env):
         super().__init__(cfg, env)
@@ -185,6 +195,8 @@ class PostStepRobotRootPoseRecorder(RecorderTerm):
     for Franka-family robots but not for floor-standing embodiments.
     """
 
+    reads_step_observations = False
+
     def __init__(self, cfg: "PostStepRobotRootPoseRecorderCfg", env):
         super().__init__(cfg, env)
         self._robot_cfg_name = cfg.robot_cfg_name
@@ -224,6 +236,7 @@ class InitialCameraExtrinsicsRecorder(RecorderTerm):
     This is useful for recording camera viewpoint at the start of each episode,
     especially when camera pose randomization is enabled.
     """
+    reads_step_observations = False
     _initial_camera_extrinsics = None
 
     def __init__(self, cfg: "InitialCameraExtrinsicsRecorderCfg", env):
@@ -384,6 +397,8 @@ class PostStepBBoxRecorder(RecorderTerm):
       Corner order: [0-3] bottom face, [4-7] top face (same as ``usd_utils.get_bbox``).
     - ``centroid/{object_name}``: centroid as float16 in meters, shape ``(num_envs, 3)``
     """
+
+    reads_step_observations = False
 
     def __init__(self, cfg: "PostStepBBoxRecorderCfg", env):
         super().__init__(cfg, env)

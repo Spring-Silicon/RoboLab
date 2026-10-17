@@ -381,10 +381,13 @@ The built-in `policies/pi0_family/run.py` supports the full set of evaluation fe
 | `--enable-gt-state` | Export per-env ground-truth simulator state to the inference client each step (`obs["gt_state"] = {env_id: state}`). See [Ground-Truth State Export](#ground-truth-state-export). | `False` |
 | `--record-image-data` | Record image observations to HDF5 | `False` |
 | `--video-mode MODE` | Which videos to save: `all` (sensor + viewport), `viewport` only, `sensor` only, or `none` | `all` |
+| `--render-policy-steps-only` | Render cameras only on steps whose observation the policy client queries with (action-chunking clients). Requires `--video-mode none`. See [Rendering Only Policy Steps](#rendering-only-policy-steps). | `False` |
+| `--render-warmup-steps N` | With `--render-policy-steps-only`, also render (without camera read-back) the `N` steps before each consumed step. See [Rendering Only Policy Steps](#rendering-only-policy-steps). | `0` |
 | `--renderer MODE` | RTX renderer: `realtime` (RaytracedLighting) or `pathtracing` (PathTracing). See [Renderer Selection](#renderer-selection). | `realtime` |
 | `--rendering-type MODE` | Realtime quality preset: `performance`, `balanced`, or `quality`. No effect under `--renderer pathtracing`. | IsaacLab default (`balanced`) |
 | `--randomize-background` | Sample a random non-default background per task at registration time. The chosen texture is recorded in each task's `env_cfg.json`. See [Backgrounds — Per-Run Random Background per Task](background.md#per-run-random-background-per-task). | `False` |
 | `--background-seed N` | Seed for reproducible per-task background sampling. Used with `--randomize-background`. | `None` |
+| `--limit-cpu-threads N` | Size of Kit's carb.tasking and TBB worker pools (Isaac Sim `limit_cpu_threads`). See [Running Many Evaluations per Machine](#running-many-evaluations-per-machine). | `4` |
 | `--headless` | Run without live display window. **Recommended for multi-task runs** — see [GPU VRAM leak in non-headless mode](debug.md#gpu-vram-leak-in-non-headless-mode-across-environment-reloads) | `False` |
 | `--enable-verbose` | Verbose output | `False` |
 | `--enable-debug` | Debug output | `False` |
@@ -432,6 +435,53 @@ python policies/pi0_family/run.py --output-folder-name 2026-01-24_15-35-59_pi05
 ```
 
 **Runtime estimate:** Each task runs up to 900 steps. With policy inference overhead, expect roughly **~15 min per task per run** on a single GPU (at ~1–2 it/s depending on `num_envs` and policy backend). For the full 120-task benchmark this works out to approximately **~20–30 hours per 100 tasks** on a single machine. Tasks that succeed early terminate faster, so actual runtime is usually on the lower end.
+
+### Rendering Only Policy Steps
+
+Action-chunking clients (`open_loop_horizon > 1`, e.g. pi0 10, GR00T 10, DreamZero 24) query their policy with an observation only once per chunk; the other steps replay cached actions. Without video, `--render-policy-steps-only` (`run_episode(render_policy_steps_only=True)`) renders, reads back the cameras and computes the camera observation groups (`image_obs`, `viewport_cam`) only on steps whose observation the client will query with, as reported by `InferenceClient.controls_until_observation` (any active env counts; `open_loop_horizon=1` clients render every step). On the other steps the camera groups are `UnrenderedObservationGroup` placeholders: reading any of their terms raises, so a policy can never receive an image from an earlier render. Physics, non-image observations, recorders (HDF5) and success checks still run on every step and are bitwise identical to the default. The flag requires `--video-mode none` and is incompatible with `--record-image-data`. The default renders every step.
+
+RTX real-time rendering keeps temporal history (anti-aliasing, lighting cache, denoising), so a frame rendered after skipped steps is not pixel-identical to the same frame rendered every step. `--render-warmup-steps N` also renders the `N` steps before each consumed step (no read-back); `N >= open_loop_horizon - 1` renders every step and gives the default images, while still skipping camera read-back and image observations on unconsumed steps.
+
+Measured on an L40S with `MustardInRightBinTask`, 1 env, CPU PhysX (`OMP_NUM_THREADS=4`), 450 steps, HDF5 on, video off, a scripted chunking client (no model):
+
+| Mode | ms/step | s/episode | Busy cores | GPU util |
+|---|---:|---:|---:|---:|
+| Default (render every step) | 28.8–30.4 | 13.0–13.7 | 9.7–10.4 | 29–31% |
+| `--render-policy-steps-only`, horizon 8 | 13.5–13.8 | 6.1–6.2 | 7.0–8.4 | 10% |
+| `--render-policy-steps-only`, horizon 10 | 12.8–13.2 | 5.8–5.9 | 7.7–8.4 | 8–9% |
+| `--render-policy-steps-only`, horizon 24 | 11.4–11.9 | 5.1–5.3 | 7.3–7.9 | 5–6% |
+| horizon 10, `--render-warmup-steps 2` | 15.7–15.8 | 7.1 | 7.6–8.2 | 17–18% |
+| horizon 10, `--render-warmup-steps 4` | 18.6–19.1 | 8.4–8.6 | 8.4–8.5 | 23% |
+| horizon 10, `--render-warmup-steps 9` | 26.0–26.3 | 11.7–11.9 | 8.8–9.1 | 31% |
+
+Mean absolute pixel difference (0–255 scale) of the images at the consumed steps versus a fresh process rendering every step, per camera (over-shoulder / wrist / viewport). For reference, two fresh processes rendering every step differ by 0.17 / 0.41 / 0.39, and the same frames rendered in the second or third episode of one process (a different renderer history, as in every multi-run evaluation) differ by 0.59–0.65 / 2.04–2.13 / 0.78–1.10.
+
+| Warm-up steps (horizon 10) | 0 | 1 | 2 | 4 | 8 | 9 |
+|---|---:|---:|---:|---:|---:|---:|
+| Over-shoulder | 1.02 | 0.81 | 0.69 | 0.61 | 0.50 | 0.17 |
+| Wrist | 2.93 | 2.22 | 2.22 | 2.00 | 1.86 | 0.41 |
+| Viewport | 1.33 | 1.10 | 0.93 | 0.74 | 0.50 | 0.40 |
+
+Horizon 24 without warm-up differs by 1.10 / 3.29 / 1.56–1.60. Judge whether the images your policy receives may differ this much before using the mode for results that are compared with default-rendered evaluations.
+
+### Running Many Evaluations per Machine
+
+One evaluation process drives a single scene from one main Python thread and keeps the GPU busy only part of each step, so a machine evaluates fastest with several processes per GPU (for example one process per task, each with its own `--output-folder-name`). With `--device cpu` (CPU PhysX), RTX rendering still runs on the GPU.
+
+- Keep `--limit-cpu-threads` at 4 and set `OMP_NUM_THREADS=1`. Isaac Sim's default 32-thread pools spin about four extra cores per process without shortening a step.
+- Give each task's episodes to one process with `--num_envs` (for example 10 envs for 10 episodes). Ten envs in one process render with about a third less GPU time per env-step than ten single-env processes and use about 0.9 GiB of GPU memory per env instead of 4.0 GiB per process.
+- Size the number of processes per GPU by GPU memory: a 1-env process needs about 4.0 GiB and a 10-env process about 9.2 GiB. Running out of GPU memory crashes the renderer (`ERROR_DEVICE_LOST`).
+
+Measured on one L40S (45 GiB usable) with CPU PhysX, `MustardInRightBinTask`, 450-step episodes with sensor video and HDF5, a scripted client (no model):
+
+| Processes per GPU | Episodes per hour | Busy cores | GPU util | GPU memory |
+|---|---:|---:|---:|---:|
+| 1 × 1 env | 296 | – | – | 4.0 GiB |
+| 8 × 1 env | 677 | 9.8 | 84% | 32.2 GiB |
+| 1 × 10 envs | 584 | 2.3 | 40% | 9.2 GiB |
+| 4 × 10 envs | 1342 | 5.8 | 92% | 37.0 GiB |
+
+The original tree evaluated 36 such episodes per hour with one process on the same GPU. A real policy adds its inference latency to every queried step.
 
 ## Evaluation Features
 

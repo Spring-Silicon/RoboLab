@@ -9,6 +9,8 @@ from isaaclab.utils import configclass
 
 
 class MetricsRecorderTerm(RecorderTerm):
+    reads_step_observations = False
+
     def __init__(self, cfg, env):
         super().__init__(cfg, env)
 

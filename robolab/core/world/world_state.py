@@ -221,6 +221,7 @@ class WorldState:
         self._local_geometry_cache[body_name] = {
             'corners': local_corners,         # (8, 3) torch on device
             'centroid': local_centroid,        # (3,) torch on device
+            'bbox_points': torch.cat((local_corners, local_centroid.unsqueeze(0))),
             'aabb_lower': lower * scale_np,   # (3,) np
             'aabb_upper': upper * scale_np,   # (3,) np
             'dimensions': dimensions,         # (3,) np
@@ -410,16 +411,15 @@ class WorldState:
         """
         body = self.get_body(body_name)
         if isinstance(body, AssetBase):
+            # Relative subtraction already creates owned storage; don't clone
+            # the position first. Absolute poses still return an owned snapshot.
+            pos = body.data.root_pos_w
+            quat = body.data.root_quat_w
+            origins = self.env.scene.env_origins
             if env_id is not None:
-                pos = body.data.root_pos_w[env_id].clone().detach()
-                quat = body.data.root_quat_w[env_id].clone().detach()
-                if is_relative:
-                    pos = pos - self.env.scene.env_origins[env_id]
-            else:
-                pos = body.data.root_pos_w.clone().detach()  # (N, 3)
-                quat = body.data.root_quat_w.clone().detach()  # (N, 4)
-                if is_relative:
-                    pos = pos - self.env.scene.env_origins  # (N, 3)
+                pos, quat, origins = pos[env_id], quat[env_id], origins[env_id]
+            pos = pos.detach() - origins if is_relative else pos.detach().clone()
+            quat = quat.detach().clone()
         elif isinstance(body, XFORM_PRIM_TYPES):
             num_prims = len(body._prim_paths) if hasattr(body, '_prim_paths') else body.count
             if env_id is not None:
@@ -442,23 +442,13 @@ class WorldState:
                 # In that case, compute relative pose from prim 0 and replicate.
                 positions, orientations = body.get_world_poses()
                 if num_prims >= self.env.num_envs:
-                    # One prim per env — straightforward
-                    all_pos, all_quat = [], []
-                    for i in range(self.env.num_envs):
-                        p = positions[i]
-                        q = orientations[i]
-                        if not isinstance(p, torch.Tensor):
-                            p = torch.tensor(p, dtype=torch.float32, device=self.env.device)
-                            q = torch.tensor(q, dtype=torch.float32, device=self.env.device)
-                        else:
-                            p = p.clone().detach()
-                            q = q.clone().detach()
-                        if is_relative:
-                            p = p - self.env.scene.env_origins[i]
-                        all_pos.append(p)
-                        all_quat.append(q)
-                    pos = torch.stack(all_pos)  # (N, 3)
-                    quat = torch.stack(all_quat)  # (N, 4)
+                    # Convert/gather the batch once, not once per environment.
+                    if not isinstance(positions, torch.Tensor):
+                        positions = torch.as_tensor(positions, dtype=torch.float32, device=self.env.device)
+                        orientations = torch.as_tensor(orientations, dtype=torch.float32, device=self.env.device)
+                    pos = positions[:self.env.num_envs].detach()
+                    quat = orientations[:self.env.num_envs].detach().clone()
+                    pos = pos - self.env.scene.env_origins if is_relative else pos.clone()
                 else:
                     # Fewer prims than envs — static object, same relative pose in all envs
                     p0 = positions[0]
@@ -530,36 +520,20 @@ class WorldState:
         geom = self._get_local_geometry(body)
         pos, quat = self.get_pose(body, env_id=env_id)
 
+        # Transform corners and centroid together so quaternion conversion and
+        # batched matrix setup happen once. No dynamic pose is cached across calls.
         if env_id is not None:
-            # Single env — transform and return legacy format
-            corners_world = transform_points(
-                geom['corners'].unsqueeze(0),   # (1, 8, 3)
-                pos=pos.unsqueeze(0),            # (1, 3)
-                quat=quat.unsqueeze(0)           # (1, 4)
-            ).squeeze(0)  # (8, 3)
-            centroid_world = transform_points(
-                geom['centroid'].reshape(1, 1, 3),  # (1, 1, 3)
-                pos=pos.unsqueeze(0),
-                quat=quat.unsqueeze(0)
-            ).squeeze(0).squeeze(0)  # (3,)
-            # Convert to legacy format
-            corners_list = [Gf.Vec3d(*c.cpu().tolist()) for c in corners_world]
-            centroid_np = centroid_world.cpu().numpy()
-            return corners_list, centroid_np
-        else:
-            # All envs — fully vectorized
-            num_envs = pos.shape[0]
-            corners_world = transform_points(
-                geom['corners'].unsqueeze(0).expand(num_envs, -1, -1),  # (N, 8, 3)
-                pos=pos,    # (N, 3)
-                quat=quat   # (N, 4)
-            )  # (N, 8, 3)
-            centroid_world = transform_points(
-                geom['centroid'].reshape(1, 1, 3).expand(num_envs, -1, -1),  # (N, 1, 3)
-                pos=pos,
-                quat=quat
-            ).squeeze(1)  # (N, 3)
-            return corners_world, centroid_world
+            points_world = transform_points(
+                geom['bbox_points'].unsqueeze(0),
+                pos=pos.unsqueeze(0), quat=quat.unsqueeze(0),
+            ).squeeze(0).cpu()
+            corners_list = [Gf.Vec3d(*c) for c in points_world[:8].tolist()]
+            return corners_list, points_world[8].numpy()
+        points_world = transform_points(
+            geom['bbox_points'].unsqueeze(0).expand(pos.shape[0], -1, -1),
+            pos=pos, quat=quat,
+        )
+        return points_world[:, :8], points_world[:, 8]
 
     def get_local_geometric_center(self, body: str) -> np.ndarray:
         """
@@ -579,8 +553,18 @@ class WorldState:
         Args:
             env_id: None → Tensor(num_envs, 3), int → np.ndarray(3,)
         """
-        _, centroid = self.get_bbox(body, env_id=env_id)
-        return centroid
+        geom = self._get_local_geometry(body)
+        pos, quat = self.get_pose(body, env_id=env_id)
+        if env_id is not None:
+            centroid = transform_points(
+                geom['centroid'].reshape(1, 1, 3),
+                pos=pos.unsqueeze(0), quat=quat.unsqueeze(0),
+            ).reshape(3)
+            return centroid.cpu().numpy()
+        return transform_points(
+            geom['centroid'].reshape(1, 1, 3).expand(pos.shape[0], -1, -1),
+            pos=pos, quat=quat,
+        ).squeeze(1)
 
     #########################################################
     # Contact
@@ -615,6 +599,8 @@ class WorldState:
         ]
         if env_id is not None:
             return any(self._in_contact_pair(b1, b2, force_threshold, env_id) for b1, b2 in pairs)
+        if len(pairs) == 1:
+            return self._in_contact_pair(*pairs[0], force_threshold, env_id)
         results = [self._in_contact_pair(b1, b2, force_threshold, env_id) for b1, b2 in pairs]
         return torch.stack(results, dim=0).any(dim=0)  # (N,)
 
@@ -636,7 +622,7 @@ class WorldState:
                 f"got {tuple(force_matrix.shape)}"
             )
             above = torch.abs(force_matrix) > force_threshold  # (N, B, M, 3)
-            return above.any(dim=-1).any(dim=-1).any(dim=-1)   # (N,)
+            return above.flatten(start_dim=1).any(dim=-1)  # (N,)
 
     def get_objects_in_contact_with(
         self,

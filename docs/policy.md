@@ -76,6 +76,7 @@ class MyPolicyClient(InferenceClient):
 - `_extract_observation` + `_pack_request` split repo-specific obs munging from backend-specific wire format. The ABC's default `infer()` wires them together: extract → pack → query → unpack → postprocess → cache chunk → step one action.
 - Action dict returned by `infer()` has `"action"` (numpy array, typically 8-dim: 7 joints + 1 gripper) and `"viz"` (image for the live display window, or `None`).
 - `reset(env_id=...)` clears per-episode state; `begin_episode(episode_idx)` is called before each episode starts. Override either only if your server needs session notification; otherwise the base's defaults are enough.
+- `controls_until_observation(env_id)` tells the episode loop how many upcoming observations the client will not query its policy with (derived from `open_loop_horizon` and the chunk state). With `--render-policy-steps-only` only queried observations are rendered; the other steps carry unrendered camera groups that raise if read, and the default `infer()` then just advances the cached chunk (`"viz"` is `None`). Clients that override `infer()` with different refresh rules must override `controls_until_observation` to match. See [Rendering only policy steps](environment_run.md#rendering-only-policy-steps).
 - There is no central registry or factory — each runner imports its client class directly and constructs it inline:
 
 ```python

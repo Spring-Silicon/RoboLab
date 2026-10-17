@@ -1,5 +1,90 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Fixed-action simulator segment benchmark with warm-up/repetition boundaries,
+  source/configuration provenance, invalid-work rejection, and saved trajectory
+  and camera evidence. An artifact comparator separates speed from changed work
+  or numerical/visual divergence (`scripts/benchmark_speed.py`,
+  `scripts/compare_speed.py`; usage in `docs/data.md`).
+- Benchmark provenance includes upstream sensor implementation hashes and host
+  thread controls. Comparisons report changed upstream source manifests. Documented
+  L40S measurements distinguish the unchanged-GPU pacing fix from opt-in CPU
+  PhysX and the separately patched Isaac Lab CPU camera path.
+- Opt-in render-on-demand evaluation for action-chunking clients without video:
+  `--render-policy-steps-only` (`run_episode(render_policy_steps_only=True)`) renders,
+  reads back cameras and computes camera observation groups only on control steps
+  whose observation the client queries its policy with
+  (`InferenceClient.controls_until_observation`). Other steps return
+  `UnrenderedObservationGroup` placeholders that raise if read, so no stale image
+  reaches a policy; physics, non-image observations, recorders and success checks
+  still run every step. Requires `--video-mode none` and no image recording. The
+  default (render every step) is unchanged. RTX temporal history makes skipped-step
+  images differ from rendering every step; `--render-warmup-steps N` renders the `N`
+  preceding steps (no read-back), and `N >= open_loop_horizon - 1` restores the
+  default pixels. Measurements in `docs/environment_run.md`.
+- `--limit-cpu-threads` (default 4) for evaluation runners and `scripts/benchmark_speed.py`,
+  forwarded to Isaac Sim's `limit_cpu_threads` to size Kit's carb.tasking and TBB worker pools
+  (Isaac Sim's default is 32). One eval process keeps only a few workers busy; the default pools
+  spin about four extra cores per process without shortening a step. Pass 32 to restore Isaac
+  Sim's sizing. Only thread scheduling changes.
+
+### Changed
+
+- Contact sensors created by RoboLab default to `history_length=0`. RoboLab
+  predicates, event tracking and recorders read only the latest `force_matrix_w`,
+  so sensors now refresh lazily once per query instead of after every physics
+  substep; latest contact values are unchanged. Pass a positive history to the
+  `create_*contact_sensor_cfg` helpers for custom consumers of `*_history`.
+- RoboLab recorder terms declare `reads_step_observations = False`, letting Isaac
+  Lab skip the duplicate pre-recorder observation compute. Returned observations,
+  recorded datasets and camera frame counts are unchanged.
+- Sensor videos: half-scale frames use an exact integer 2x2 mean (bit-identical to
+  the previous bilinear interpolation), computed for all active envs in one batch with
+  one host transfer (`unpack_combined_frames`), and `VideoWriter` encodes on a
+  background thread through an ordered, bounded queue; every frame is still encoded
+  in order. Encoding errors surface from the next `write()` or from `release()`.
+- On CPU, unpacked camera `rgb` observations (a strided view of the camera's `rgba`
+  buffer) are packed with OpenCV before the observation manager's copy; values are
+  unchanged.
+- Subtask recording reads frozen-env state from host-side mirrors and transfers
+  episode lengths/event masks once per step instead of once per environment.
+- With CPU-device observations, sensor-video frames are prepared on each env's
+  `VideoWriter` thread instead of the simulation thread: `run_episode` queues the
+  env's camera images (`camera_frame_sources`) with the new
+  `VideoWriter.write_deferred()`, and the writer computes the same exact half-scale
+  combined frame (`combine_camera_frames`, one TorchScript call that does not hold
+  the GIL). Encoder inputs are bit-identical and keep their order; errors preparing a
+  frame surface like encoding errors. Policy clients must not modify observation
+  tensors in place (no in-repo client does). GPU-device runs keep the batched path.
+- `RobolabRecorderManager` snapshots each per-control recorder output once for all
+  envs and splits it into per-env `EpisodeData` only when the episode buffers are
+  read (flush, export, reset callbacks, `get_episode`) or the recorded env set
+  changes, instead of one `EpisodeData.add` per env, leaf and control. Exported
+  HDF5 datasets, attributes and sample counts are unchanged.
+
+### Fixed
+
+- Episode timing now measures reset-to-finalization wall time rather than the sum
+  of selected host sections. CUDA is synchronized at episode boundaries; versioned
+  timing records distinguish batched control steps from active environment steps.
+  Environment creation and summary generation remain outside the episode timer.
+- Headless `create_env()` disables Kit's wall-clock frame limiter after scene
+  initialization. Physics timestep, solver settings, camera cadence/quality,
+  task checks, recording, and episode horizons remain unchanged; GUI pacing is
+  not changed.
+
+### Changed
+
+- RoboLab environments run PhysX with an inline CPU task dispatcher
+  (`PhysxCfg.worker_thread_count = 0`). Only task scheduling changes: on the L40S
+  segment benchmark the saved trajectories are bitwise identical while
+  `physics_step` drops from 12.1 to 4.4 ms/control (CPU PhysX) and from 58.1 to
+  51.2 ms/control (GPU PhysX). The previous `num_threads` entry matched no
+  Isaac Lab field and had no effect.
+
 ## [0.3.1] - 2026-08-11
 
 ### Added

@@ -17,6 +17,7 @@ import os
 import re
 import time
 from collections import defaultdict
+from functools import partial
 
 import cv2
 import torch
@@ -25,11 +26,12 @@ from tqdm import tqdm
 logger = logging.getLogger(__name__)
 
 class TimingStats:
-    """Simple timing utility for profiling code sections."""
+    """Episode wall clock plus host-side section timings (not GPU kernel timings)."""
 
     def __init__(self):
         self.times = defaultdict(list)
         self._start_times = {}
+        self._wall_start = time.perf_counter()
 
     def start(self, name: str):
         self._start_times[name] = time.perf_counter()
@@ -40,19 +42,29 @@ class TimingStats:
             self.times[name].append(elapsed)
             del self._start_times[name]
 
-    def to_dict(self, num_steps: int) -> dict:
-        """Return timing summary as a dict for results logging."""
-        d = {}
+    def to_dict(self, num_steps: int, *, active_env_steps: int) -> dict:
+        """Include reset, bookkeeping, and finalization, not just named sections."""
+        elapsed = time.perf_counter() - self._wall_start
+        d = {"timing_schema_version": 2}
         for name, times in self.times.items():
-            d[f"{name}_s"] = round(sum(times), 3)
-            d[f"{name}_avg_ms"] = round(sum(times) / len(times) * 1000, 1) if times else 0
-        d["wall_total_s"] = round(sum(sum(t) for t in self.times.values()), 3)
-        d["it_per_sec"] = round(num_steps / d["wall_total_s"], 2) if d["wall_total_s"] > 0 else 0
+            d[f"{name}_s"] = sum(times)
+            d[f"{name}_avg_ms"] = sum(times) / len(times) * 1000 if times else 0.0
+        d["timed_sections_s"] = sum(sum(t) for t in self.times.values())
+        d["wall_total_s"] = elapsed
+        d["control_steps"] = num_steps
+        d["active_env_steps"] = active_env_steps
+        d["it_per_sec"] = num_steps / elapsed if elapsed > 0 else 0.0
+        d["active_env_steps_per_sec"] = active_env_steps / elapsed if elapsed > 0 else 0.0
         return d
 
 from robolab.constants import VISUALIZE, get_output_dir
 from robolab.core.logging.results import get_all_env_subtask_infos
-from robolab.core.observations.observation_utils import unpack_image_obs, unpack_viewport_cams
+from robolab.core.observations.observation_utils import (
+    camera_frame_sources,
+    combine_camera_frames,
+    unpack_combined_frames,
+    unpack_viewport_cams,
+)
 from robolab.core.utils.video_utils import VideoWriter
 from robolab.core.world.world_state import get_world
 from robolab.eval.base_client import InferenceClient
@@ -68,6 +80,8 @@ def run_episode(
     save_videos=True,
     video_mode="all",
     enable_gt_state=False,
+    render_policy_steps_only=False,
+    render_warmup_steps=0,
 ):
     """Run a policy-controlled episode across all parallel envs.
 
@@ -80,13 +94,29 @@ def run_episode(
         env_cfg: Environment configuration
         episode: Run index (each run produces num_envs episodes)
         client: Constructed inference client. One connection shared across envs
-            with per-env chunk state keyed by ``env_id``.
+            with per-env chunk state keyed by ``env_id``. Clients must not modify
+            observation tensors in place: with host (CPU-device) observations,
+            sensor-video frames are prepared from them on the video writer threads.
         headless: If True, don't display video
         save_videos: If True, save per-env episode videos
         video_mode: Which videos to save: 'all', 'viewport', 'sensor', or 'none'
         enable_gt_state: Attach per-env ground-truth sim state to the obs dict
             as ``obs["gt_state"] = {env_id: state}`` each step (see
             ``robolab/eval/gt_state.py`` for the schema).
+        render_policy_steps_only: Render, read back cameras and compute camera
+            observation groups only for steps whose observation the client
+            will query its policy with (``client.controls_until_observation``
+            is 0 for any active env). Other steps skip all three, and their
+            camera groups are unrendered placeholders that raise if read.
+            Physics, non-camera observations, recorders and success checks run
+            on every step. Requires ``save_videos=False`` and no recording of
+            policy observations. Default False: render every step.
+        render_warmup_steps: With ``render_policy_steps_only``, also render
+            (without reading cameras) this many steps before each consumed
+            step. RTX real-time rendering keeps temporal history, so consumed
+            images move closer to rendering every step as this grows; at
+            ``open_loop_horizon - 1`` or more every step renders and only the
+            camera read-back and image observations are skipped. Default 0.
 
     Returns:
         tuple: (env_results, subtask_status, timing)
@@ -94,6 +124,19 @@ def run_episode(
             subtask_status: list of per-step subtask info dicts
             timing: dict with wall-clock timing breakdown
     """
+    if render_policy_steps_only:
+        if save_videos and video_mode != "none":
+            raise ValueError("render_policy_steps_only requires video recording to be disabled")
+        if getattr(env_cfg.recorders, "record_policy_observations", None) is not None:
+            raise ValueError("render_policy_steps_only cannot record policy observations (RECORD_IMAGE_DATA)")
+        if render_warmup_steps < 0:
+            raise ValueError("render_warmup_steps must be >= 0")
+    elif render_warmup_steps:
+        raise ValueError("render_warmup_steps requires render_policy_steps_only")
+
+    cuda_device = torch.device(env.device)
+    if cuda_device.type == "cuda":
+        torch.cuda.synchronize(cuda_device)
     timer = TimingStats()
 
     obs, _ = env.reset()
@@ -151,6 +194,7 @@ def run_episode(
     kit_app = omni.kit.app.get_app()
 
     actual_steps = 0
+    active_env_steps = 0
     try:
         for step in tqdm(range(max_steps)):
 
@@ -178,8 +222,9 @@ def run_episode(
             # loop, so other policies behave exactly as before.
             actions = torch.zeros(env.num_envs, action_dim, device=env.device)
             last_viz = None
+            active_env_ids = list(env.active_env_ids)
             rets = client.infer_batch(
-                obs, instruction, env_ids=list(env.active_env_ids)
+                obs, instruction, env_ids=active_env_ids
             )
             for env_id in sorted(rets):
                 ret = rets[env_id]
@@ -196,28 +241,50 @@ def run_episode(
                 get_world(env).visualize()
 
             timer.start("env_step")
-            obs, reward, term, trunc, info = env.step(actions)
+            if render_policy_steps_only:
+                # Steps until any active env next queries its policy with an observation.
+                until_consumed = min(client.controls_until_observation(env_id) for env_id in active_env_ids)
+                obs, reward, term, trunc, info = env.step(
+                    actions,
+                    render=until_consumed <= render_warmup_steps,
+                    camera_observations=until_consumed == 0,
+                )
+            else:
+                obs, reward, term, trunc, info = env.step(actions)
             timer.stop("env_step")
 
             # Collect per-env subtask info (list of dicts, one per env)
             per_env_infos = get_all_env_subtask_infos(env)
             subtask_status.append(per_env_infos)
 
-            # Write per-env video frames (skip frozen envs)
+            # Write per-env video frames (skip frozen envs). Frozen envs are exactly the
+            # envs removed from the host-side active set, so no device mask is read here.
             if save_videos:
                 timer.start("video_write")
-                for env_id in range(env.num_envs):
-                    if env._frozen_envs[env_id]:
-                        continue
-                    if save_sensor:
-                        frame_obs = unpack_image_obs(obs, scale=0.5, env_id=env_id).get("combined_image")
-                        video_writers_obs[env_id].write(frame_obs)
-                    if save_viewport:
+                active_set = set(env.active_env_ids)
+                still_active = [env_id for env_id in range(env.num_envs) if env_id in active_set]
+                if save_sensor and still_active:
+                    if cuda_device.type == "cpu":
+                        # Each env's writer thread halves and concatenates that env's camera images.
+                        # The observation manager returns newly allocated (cloned) tensors each step
+                        # and nothing writes to them afterwards, so the writers read them without a copy.
+                        for env_id in still_active:
+                            video_writers_obs[env_id].write_deferred(
+                                partial(combine_camera_frames, camera_frame_sources(obs, env_id), 0.5)
+                            )
+                    else:
+                        # one batched resize and host transfer; each frame is a fresh, never-modified row
+                        frames_obs = unpack_combined_frames(obs, still_active, scale=0.5)
+                        for frame_obs, env_id in zip(frames_obs, still_active):
+                            video_writers_obs[env_id].write(frame_obs, take_ownership=True)
+                if save_viewport:
+                    for env_id in still_active:
                         frame_vp = unpack_viewport_cams(obs, env_id=env_id).get("combined_image")
-                        video_writers_viewport[env_id].write(frame_vp)
+                        video_writers_viewport[env_id].write(frame_vp, take_ownership=True)
                 timer.stop("video_write")
 
             actual_steps += 1
+            active_env_steps += len(active_env_ids)
 
             # RobolabEnv freezes terminated envs and exports recordings automatically
             if env.all_terminated:
@@ -233,5 +300,7 @@ def run_episode(
         except Exception:
             logger.exception("Failed to reset client after episode")
 
-    timing = timer.to_dict(actual_steps)
+    if cuda_device.type == "cuda":
+        torch.cuda.synchronize(cuda_device)
+    timing = timer.to_dict(actual_steps, active_env_steps=active_env_steps)
     return env.get_env_results(), subtask_status, timing

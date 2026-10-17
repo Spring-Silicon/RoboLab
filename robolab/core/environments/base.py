@@ -211,7 +211,10 @@ class RobolabDefaultEnvCfg(ManagerBasedRLEnvCfg):
             "bounce_threshold_velocity": 0.2,
             "max_depenetration_velocity": 100.0,
             "solver_type": 1,
-            "num_threads": 4,
+            # PhysX CPU dispatcher: run all PhysX tasks on the stepping thread (scheduling only;
+            # fastest for RoboLab's small scenes on both CPU and GPU simulation, also with 10 envs
+            # per scene: CPU physics_step 17.3 ms/control vs 37.7 / 42.5 ms with 2 / 4 workers).
+            "worker_thread_count": 0,
             "relaxation": 0.75,
             "warm_start": 0.4,
             "shape_collision_distance": 0.0,

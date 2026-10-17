@@ -217,7 +217,7 @@ def enclosed(world, inside_obj: str, outside_obj: str, tolerance: float = 0.0, e
 def centroid_in_footprint(world, obj: str, surface: str, tolerance: float = 0.01, env_id: int | None = None):
     """Check if obj's centroid xy lies within surface's AABB footprint (z is ignored)."""
     surface_corners, _ = world.get_bbox(surface, env_id=env_id)
-    _, centroid = world.get_bbox(obj, env_id=env_id)
+    centroid = world.get_centroid(obj, env_id=env_id)
 
     if env_id is not None:
         min_x, max_x, min_y, max_y, _, _ = _bbox_min_max(surface_corners, env_id)
@@ -422,7 +422,7 @@ def _vertical_check(world, obj: str, surface: str, tolerance: float, z_margin: f
         ref_z = max_z if use_max_z else min_z
 
         if mode == "centroid":
-            _, centroid = world.get_bbox(obj, env_id=env_id)
+            centroid = world.get_centroid(obj, env_id=env_id)
             xy_ok = (min_x - tolerance <= centroid[0] <= max_x + tolerance and
                      min_y - tolerance <= centroid[1] <= max_y + tolerance)
             if obj_above:
@@ -445,7 +445,7 @@ def _vertical_check(world, obj: str, surface: str, tolerance: float, z_margin: f
         ref_z = s_maxs[:, 2] if use_max_z else s_mins[:, 2]  # (N,)
 
         if mode == "centroid":
-            _, centroid = world.get_bbox(obj, env_id=env_id)  # (N, 3)
+            centroid = world.get_centroid(obj, env_id=env_id)  # (N, 3)
             x_ok = (centroid[:, 0] >= s_mins[:, 0] - tolerance) & (centroid[:, 0] <= s_maxs[:, 0] + tolerance)
             y_ok = (centroid[:, 1] >= s_mins[:, 1] - tolerance) & (centroid[:, 1] <= s_maxs[:, 1] + tolerance)
             if obj_above:

@@ -220,6 +220,12 @@ def create_env(scene: str | ManagerBasedEnvCfg,
 
     check_scene_valid(env)
 
+    if not env.sim.has_gui():
+        # Isaac Sim can pace every app.update() to the camera rate. Evaluation
+        # advances physics explicitly; remove wall-clock waiting, not renders or
+        # physics steps. Keep interactive GUI pacing unchanged.
+        env.sim.set_setting("/app/runLoops/main/rateLimitEnabled", False)
+
     # disable control on stop
     env.sim._app_control_on_stop_handle = None  # type: ignore
 

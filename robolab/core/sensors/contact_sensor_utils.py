@@ -5,7 +5,11 @@ import torch
 from isaaclab.sensors import ContactSensor, ContactSensorCfg
 
 
-def create_contact_sensor_cfg(entity_1, entity_2, update_period=0.0, history_length=6, debug_vis=False):
+# RoboLab predicates read only the latest ``force_matrix_w``. With ``history_length=0`` the sensors
+# stay lazy and read PhysX once when queried after a control step, instead of after every physics
+# substep. The latest values are the same; pass a positive history only if a consumer needs
+# ``*_history`` buffers of per-substep forces.
+def create_contact_sensor_cfg(entity_1, entity_2, update_period=0.0, history_length=0, debug_vis=False):
         return ContactSensorCfg(
             prim_path=entity_1,
             update_period=update_period,
@@ -16,7 +20,7 @@ def create_contact_sensor_cfg(entity_1, entity_2, update_period=0.0, history_len
 
 
 def create_batch_contact_sensor_cfg(entity_prim_path: str, filter_prim_paths: list[str],
-                                     update_period=0.0, history_length=6, debug_vis=False):
+                                     update_period=0.0, history_length=0, debug_vis=False):
     """
     Create a contact sensor that monitors contacts between one entity and multiple filter entities.
 
@@ -27,7 +31,8 @@ def create_batch_contact_sensor_cfg(entity_prim_path: str, filter_prim_paths: li
         entity_prim_path: The prim path of the body to monitor contacts for
         filter_prim_paths: List of prim paths to check contacts against
         update_period: Sensor update period
-        history_length: Number of contact history frames to store
+        history_length: Number of per-physics-step contact history frames to store. A positive
+            value refreshes the sensor after every physics step; 0 (default) refreshes on access.
         debug_vis: Enable debug visualization
 
     Returns:

@@ -64,7 +64,15 @@ class InferenceClient(ABC):
         Default flow: extract -> pack -> query -> unpack -> postprocess ->
         cache chunk -> step one action. Override entirely if your client needs
         a different control loop.
+
+        When ``run_episode(render_policy_steps_only=True)`` skipped rendering
+        for an observation this client does not query with, the camera groups
+        of ``obs`` are unrendered placeholders; the step then only advances the
+        cached chunk (no extraction, ``viz`` is None).
         """
+        if not self._needs_refresh(env_id) and self._has_unrendered_groups(obs):
+            return {"action": self._next_action(env_id), "viz": None}
+
         extracted = self._extract_observation(obs, env_id=env_id)
 
         if self._needs_refresh(env_id):
@@ -115,6 +123,22 @@ class InferenceClient(ABC):
     def visualize(self, obs: Any, *, env_id: int = 0) -> np.ndarray | None:
         """Public convenience wrapper for callers that want the viz image."""
         return self._build_visualization(self._extract_observation(obs, env_id=env_id))
+
+    def controls_until_observation(self, env_id: int) -> int:
+        """Number of upcoming env steps whose observation ``infer`` will not query with.
+
+        Called after ``infer`` for ``env_id``: 0 means the observation returned
+        by the next ``env.step`` feeds a policy query; ``n`` means the next
+        ``n`` observations only advance the cached chunk. ``run_episode`` uses
+        it to render only consumed observations when
+        ``render_policy_steps_only=True``. The default follows the chunking
+        helpers below; a client that bypasses them reports 0 (every
+        observation consumed). Clients that override ``infer`` with different
+        refresh rules must override this consistently.
+        """
+        if self._needs_refresh(env_id):
+            return 0
+        return max(0, self.open_loop_horizon - self._counters[env_id])
 
     # ------------------------------------------------------------------
     # Required hooks
@@ -184,6 +208,17 @@ class InferenceClient(ABC):
             return value[env_id].detach().cpu().numpy()
         array = np.asarray(value)
         return array[env_id] if array.ndim > 0 else array
+
+    @staticmethod
+    def _has_unrendered_groups(raw_obs: Any) -> bool:
+        """Whether an observation group of ``raw_obs`` was skipped because it was not rendered.
+
+        Skipped groups are Isaac Lab ``UnrenderedObservationGroup`` placeholders
+        (marked ``unrendered = True``); reading any of their terms raises.
+        """
+        return isinstance(raw_obs, dict) and any(
+            getattr(group, "unrendered", False) is True for group in raw_obs.values()
+        )
 
     # ------------------------------------------------------------------
     # Optional hooks
