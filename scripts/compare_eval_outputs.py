@@ -7,14 +7,15 @@ task folder in BASE_DIR, the script compares:
   * episode_results.jsonl rows (all fields except timing and duration); a key
     (env_name, episode) that appears twice in one folder is a failure,
   * every run_*.hdf5: the same files on both sides; all non-image datasets and dataset
-    attributes must be bit-identical; camera images (uint8 arrays with 3 or more
-    dimensions) give mean and max absolute pixel differences, because RTX images are not
-    bitwise repeatable between processes,
-  * the *.mp4 videos: the same names and frame counts; decoded frames give mean and max
-    absolute pixel differences (needs OpenCV),
+    attributes must be bit-identical (attributes whose name contains "time" or
+    "recorded_at" are skipped); camera images (uint8 arrays with 3 or more dimensions)
+    must have the same shape and give mean and max absolute pixel differences, because
+    RTX images are not bitwise repeatable between processes,
+  * the *.mp4 videos: the same names, frame counts (more than 0) and frame shapes;
+    decoded frames give mean and max absolute pixel differences (needs OpenCV),
   * env_cfg.json (without output paths and Python object addresses).
-Exit status is 1 if a non-image value or a video frame count differs, or a file is
-missing or extra.
+Exit status is 1 if a non-image value, an image shape, or a video frame count or shape
+differs, a video has no frames, or a file is missing or extra.
 """
 from __future__ import annotations
 
@@ -107,7 +108,8 @@ def compare(base_dir: Path, cand_dir: Path) -> dict:
         tasks[task] = result
     passed = not row_diffs and not dup_b and not dup_c and all(
         not t["missing"] and not t["extra"] and t["videos_equal"] and t["env_cfg_equal"]
-        and all(v["frames"][0] == v["frames"][1] for v in t["videos"].values())
+        and all(v["frames"][0] == v["frames"][1] and v["frames"][0] > 0 and v["shape_equal"]
+                for v in t["videos"].values())
         and all(not r["non_image_mismatches"] for r in t["runs"].values())
         for t in tasks.values()
     )
@@ -117,31 +119,39 @@ def compare(base_dir: Path, cand_dir: Path) -> dict:
 
 
 def compare_video(base: Path, cand: Path) -> dict:
-    """Frame counts (must match) and mean / max absolute pixel difference of the decoded frames."""
+    """Frame counts and shape (must match, non-empty) and mean / max absolute pixel difference of the frames."""
     import cv2
 
     cap_b, cap_c = cv2.VideoCapture(str(base)), cv2.VideoCapture(str(cand))
     frames_b = frames_c = 0
     total, pixels, peak = 0.0, 0, 0
-    while True:
-        ok_b, img_b = cap_b.read()
-        ok_c, img_c = cap_c.read()
-        frames_b += ok_b
-        frames_c += ok_c
-        if not (ok_b and ok_c):
-            break
-        diff = cv2.absdiff(img_b, img_c)
-        total += float(diff.sum(dtype=np.float64))
-        pixels += diff.size
-        peak = max(peak, int(diff.max()))
-    while ok_b:
-        ok_b, _ = cap_b.read()
-        frames_b += ok_b
-    while ok_c:
-        ok_c, _ = cap_c.read()
-        frames_c += ok_c
-    return {"frames": [frames_b, frames_c], "mean_abs": total / max(pixels, 1), "max_abs": peak}
-
+    shape_equal = True
+    try:
+        while True:
+            ok_b, img_b = cap_b.read()
+            ok_c, img_c = cap_c.read()
+            frames_b += ok_b
+            frames_c += ok_c
+            if not (ok_b and ok_c):
+                break
+            if img_b.shape != img_c.shape:
+                shape_equal = False
+                continue
+            diff = cv2.absdiff(img_b, img_c)
+            total += float(diff.sum(dtype=np.float64))
+            pixels += diff.size
+            peak = max(peak, int(diff.max()))
+        while ok_b:
+            ok_b, _ = cap_b.read()
+            frames_b += ok_b
+        while ok_c:
+            ok_c, _ = cap_c.read()
+            frames_c += ok_c
+    finally:
+        cap_b.release()
+        cap_c.release()
+    return {"frames": [frames_b, frames_c], "shape_equal": shape_equal,
+            "mean_abs": total / max(pixels, 1), "max_abs": peak}
 
 
 def _cfg(path: Path) -> object:
