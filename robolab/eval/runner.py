@@ -103,6 +103,12 @@ def add_common_eval_args(parser: argparse.ArgumentParser) -> None:
                               "many steps before each consumed step, so RTX temporal history matches rendering "
                               "every step more closely; >= open_loop_horizon - 1 renders every step and gives "
                               "the default pixels (default: 0)."))
+    parser.add_argument("--task-queue", "--task_queue", action="store_true",
+                        help=("Share the task list with other processes started with the same arguments and "
+                              "--output-folder-name. Each process claims one task at a time with a file lock "
+                              "and skips tasks that another process holds or finished, so K processes split "
+                              "the tasks and each pays Kit startup once. Requires --output-folder-name and a "
+                              "local file system (flock)."))
     parser.add_argument("--renderer", type=str, default="realtime",
                         choices=["realtime", "pathtracing"],
                         help=("RTX renderer mode (default: realtime). 'realtime' uses "
@@ -152,6 +158,8 @@ def run_evaluation(
     """
     if args.render_policy_steps_only and args.video_mode != "none":
         raise ValueError("--render-policy-steps-only requires --video-mode none")
+    if args.task_queue and args.output_folder_name is None:
+        raise ValueError("--task-queue requires --output-folder-name (all processes must share one output folder)")
     if args.render_warmup_steps and not args.render_policy_steps_only:
         raise ValueError("--render-warmup-steps requires --render-policy-steps-only")
     import os
@@ -164,6 +172,7 @@ def run_evaluation(
         check_all_episodes_complete,
         check_run_complete,
         init_experiment,
+        load_episode_results,
         summarize_experiment_results,
     )
     from robolab.core.utils.adaptive_sampling import count_task_episodes, should_continue_sampling
@@ -211,10 +220,23 @@ def run_evaluation(
 
     save_videos = args.video_mode != "none"
 
+    # Claims stay locked until this function returns (the process then exits): other
+    # processes skip a claimed task, and a crash releases its claims for a later resume.
+    task_claims = []
+
     for task_env in task_envs:
         scene_output_dir = os.path.join(output_dir, task_env)
         os.makedirs(scene_output_dir, exist_ok=True)
         set_output_dir(scene_output_dir)
+
+        if args.task_queue:
+            claim = _claim_task(output_dir, task_env)
+            if claim is None:
+                print(f"\033[96m[RoboLab] Task `{task_env}` claimed by another process. Skipping.\033[0m")
+                continue
+            task_claims.append(claim)
+            # Other processes append to the same results file; see their finished runs.
+            episode_results = load_episode_results(output_dir)
 
         if check_all_episodes_complete(
             episode_results=episode_results, env_name=task_env, num_episodes=total_episodes
@@ -311,4 +333,22 @@ def run_evaluation(
 
         env.close()
 
+    if args.task_queue:
+        episode_results = load_episode_results(output_dir)
     summarize_experiment_results(episode_results, show_timing=True)
+
+
+def _claim_task(output_dir: str, task_env: str):
+    """Take a non-blocking exclusive lock for ``task_env``; return the open file, or None if held elsewhere."""
+    import fcntl
+    import os
+
+    queue_dir = os.path.join(output_dir, ".task_queue")
+    os.makedirs(queue_dir, exist_ok=True)
+    claim = open(os.path.join(queue_dir, f"{task_env}.lock"), "a")
+    try:
+        fcntl.flock(claim.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        claim.close()
+        return None
+    return claim

@@ -665,8 +665,14 @@ def dump_results_to_file(result_file: str, data: dict | list, append: bool = Fal
 
 
 def append_episode_to_jsonl(file_path: str, episode: dict):
-    """Append a single episode result as one JSON line (append-only, no read-modify-write)."""
+    """Append a single episode result as one JSON line (append-only, no read-modify-write).
+
+    The lock keeps lines whole when several ``--task-queue`` processes share one results file.
+    """
+    import fcntl
+
     with open(file_path, "a") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
         f.write(json.dumps(episode) + "\n")
 
 
