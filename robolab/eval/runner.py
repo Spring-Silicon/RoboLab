@@ -109,6 +109,11 @@ def add_common_eval_args(parser: argparse.ArgumentParser) -> None:
                               "and skips tasks that another process holds or finished, so K processes split "
                               "the tasks and each pays Kit startup once. Requires --output-folder-name and a "
                               "local file system (flock)."))
+    parser.add_argument("--queue-unit", "--queue_unit", choices=("task", "run"), default="task",
+                        help=("With --task-queue: claim whole tasks (default) or single runs. With 'run', "
+                              "several processes split the runs of one task, so a long task with "
+                              "--num-envs 1 runs its episodes in parallel. Each process starts with a fresh "
+                              "environment, so a run's initial state does not depend on the runs before it."))
     parser.add_argument("--renderer", type=str, default="realtime",
                         choices=["realtime", "pathtracing"],
                         help=("RTX renderer mode (default: realtime). 'realtime' uses "
@@ -173,6 +178,8 @@ def run_evaluation(
         raise ValueError("--render-policy-steps-only requires --video-mode none")
     if args.task_queue and args.output_folder_name is None:
         raise ValueError("--task-queue requires --output-folder-name (all processes must share one output folder)")
+    if args.queue_unit == "run" and (not args.task_queue or args.num_episodes_adaptive is not None):
+        raise ValueError("--queue-unit run requires --task-queue and a fixed --num-runs")
     if args.render_warmup_steps and not args.render_policy_steps_only:
         raise ValueError("--render-warmup-steps requires --render-policy-steps-only")
     import os
@@ -242,12 +249,14 @@ def run_evaluation(
         os.makedirs(scene_output_dir, exist_ok=True)
         set_output_dir(scene_output_dir)
 
-        if args.task_queue:
+        run_claims = args.task_queue and args.queue_unit == "run"
+        if args.task_queue and not run_claims:
             claim = _claim_task(output_dir, task_env)
             if claim is None:
                 print(f"\033[96m[RoboLab] Task `{task_env}` claimed by another process. Skipping.\033[0m")
                 continue
             task_claims.append(claim)
+        if args.task_queue:
             # Other processes append to the same results file; see their finished runs.
             episode_results = load_episode_results(output_dir)
 
@@ -256,6 +265,39 @@ def run_evaluation(
         ):
             print(f"\033[96m[RoboLab] Task `{task_env}` already done. Skipping.\033[0m")
             continue
+
+        def run_done(run_idx: int) -> bool:
+            return all(
+                check_run_complete(episode_results=episode_results, env_name=task_env, episode=run_idx * num_envs + eid)
+                for eid in range(num_envs)
+            )
+
+        def next_run(after: int) -> int | None:
+            """The next unfinished run from ``after``; under --queue-unit run, also claim it."""
+            nonlocal episode_results
+            for run_idx in range(after, num_runs):
+                if run_done(run_idx):
+                    continue
+                if run_claims:
+                    claim = _claim_task(output_dir, f"{task_env}.run{run_idx}")
+                    if claim is None:
+                        continue
+                    # A process that finished this run and exited has released its claim.
+                    episode_results = load_episode_results(output_dir)
+                    if run_done(run_idx):
+                        claim.close()
+                        continue
+                    task_claims.append(claim)
+                return run_idx
+            return None
+
+        if is_adaptive:
+            run_idx = 0
+        else:
+            run_idx = next_run(0)
+            if run_idx is None:
+                print(f"\033[96m[RoboLab] Task `{task_env}`: every open run is claimed. Skipping.\033[0m")
+                continue
 
         env, env_cfg = create_env(
             task_env,
@@ -277,7 +319,6 @@ def run_evaluation(
         client = client_factory(args)
         client.configure_queries(mode=args.policy_query_mode, max_workers=args.policy_query_workers)
 
-        run_idx = 0
         while True:
             if is_adaptive:
                 k_so_far, n_so_far = count_task_episodes(episode_results, task_env)
@@ -289,18 +330,12 @@ def run_evaluation(
                         f"episodes ({k_so_far}/{n_so_far} success).\033[0m"
                     )
                     break
-            else:
-                if run_idx >= num_runs:
-                    break
-
-            run_episode_ids = [run_idx * num_envs + eid for eid in range(num_envs)]
-            if all(
-                check_run_complete(episode_results=episode_results, env_name=task_env, episode=ep_id)
-                for ep_id in run_episode_ids
-            ):
-                print(f"\033[96m[RoboLab] Task `{task_env}` run `{run_idx}` already done. Skipping.\033[0m")
-                run_idx += 1
-                continue
+                if run_done(run_idx):
+                    print(f"\033[96m[RoboLab] Task `{task_env}` run `{run_idx}` already done. Skipping.\033[0m")
+                    run_idx += 1
+                    continue
+            elif run_idx is None:
+                break
 
             if args.instruction_type != "default":
                 run_name = f"{task_env}_{args.instruction_type}_{run_idx}"
@@ -343,7 +378,7 @@ def run_evaluation(
             )
 
             env.reset_eval_state()
-            run_idx += 1
+            run_idx = run_idx + 1 if is_adaptive else next_run(run_idx + 1)
 
         client.close()
         env.close()
