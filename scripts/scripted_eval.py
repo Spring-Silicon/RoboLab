@@ -101,6 +101,9 @@ class ScriptedClient:
     def configure_queries(self, **_):
         pass
 
+    def close(self):
+        pass
+
     def begin_episode(self, episode_idx):
         self.reset()
 
