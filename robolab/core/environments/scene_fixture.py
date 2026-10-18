@@ -23,6 +23,7 @@ not recognize):
   ``tests/test_scene_ground.py``).
 """
 
+import functools
 import os
 from dataclasses import dataclass
 from typing import Literal
@@ -124,9 +125,15 @@ def spawn_scene_without_table_fixture(
 
 def scene_ground_height(scene_asset) -> float | None:
     """Return the scene's authored ``/GroundPlane`` z, or ``None`` if not authored."""
-    stage = Usd.Stage.Open(scene_asset.spawn.usd_path)
+    return _usd_ground_height(scene_asset.spawn.usd_path)
+
+
+@functools.cache
+def _usd_ground_height(usd_path: str) -> float | None:
+    # Task registration asks once per task; many tasks share a scene, and opening one costs seconds.
+    stage = Usd.Stage.Open(usd_path)
     if stage is None:
-        raise FileNotFoundError(f"Unable to open task scene: {scene_asset.spawn.usd_path}")
+        raise FileNotFoundError(f"Unable to open task scene: {usd_path}")
     default_prim = stage.GetDefaultPrim()
     if not default_prim.IsValid():
         return None

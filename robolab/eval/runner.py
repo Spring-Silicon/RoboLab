@@ -114,6 +114,9 @@ def add_common_eval_args(parser: argparse.ArgumentParser) -> None:
                               "several processes split the runs of one task, so a long task with "
                               "--num-envs 1 runs its episodes in parallel. Each process starts with a fresh "
                               "environment, so a run's initial state does not depend on the runs before it."))
+    parser.add_argument("--start-barrier", "--start_barrier", type=str, default=None,
+                        help=("After Kit starts, create FILE.ready.<pid> and wait until FILE exists before the "
+                              "first task. Lets many processes boot first and then start their tasks together."))
     parser.add_argument("--renderer", type=str, default="realtime",
                         choices=["realtime", "pathtracing"],
                         help=("RTX renderer mode (default: realtime). 'realtime' uses "
@@ -243,6 +246,14 @@ def run_evaluation(
     # Claims stay locked until this function returns (the process then exits): other
     # processes skip a claimed task, and a crash releases its claims for a later resume.
     task_claims = []
+
+    if args.start_barrier:
+        # Kit is up; wait for the operator's go so a fleet starts its tasks together.
+        import time
+
+        open(f"{args.start_barrier}.ready.{os.getpid()}", "w").close()
+        while not os.path.exists(args.start_barrier):
+            time.sleep(0.2)
 
     for task_env in task_envs:
         scene_output_dir = os.path.join(output_dir, task_env)
