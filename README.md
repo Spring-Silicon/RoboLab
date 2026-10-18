@@ -108,6 +108,9 @@ python policies/pi0_family/run.py --policy pi05 --disable-subtask
 
 # Resume a previous run (skips completed episodes)
 python policies/pi0_family/run.py --policy pi05 --output-folder-name my_previous_run
+
+# Share one task list between processes (start this command several times; see docs/environment_run.md)
+python policies/pi0_family/run.py --policy pi05 --headless --task-queue --output-folder-name my_eval
 ```
 
 ## Example Tasks

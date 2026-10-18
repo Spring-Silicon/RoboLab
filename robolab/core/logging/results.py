@@ -665,15 +665,27 @@ def dump_results_to_file(result_file: str, data: dict | list, append: bool = Fal
 
 
 def append_episode_to_jsonl(file_path: str, episode: dict):
-    """Append a single episode result as one JSON line (append-only, no read-modify-write)."""
+    """Append a single episode result as one JSON line (append-only, no read-modify-write).
+
+    The lock keeps lines whole when several ``--task-queue`` processes share one results file.
+    """
+    import fcntl
+
     with open(file_path, "a") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
         f.write(json.dumps(episode) + "\n")
 
 
 def load_jsonl(file_path: str) -> list[dict]:
-    """Load a JSONL file, returning a list of dicts. Skips blank/malformed lines."""
+    """Load a JSONL file, returning a list of dicts. Skips blank/malformed lines.
+
+    A shared lock waits for appends that hold the exclusive lock, so a reader never sees half a line.
+    """
+    import fcntl
+
     results = []
     with open(file_path, "r") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_SH)
         for i, line in enumerate(f, 1):
             line = line.strip()
             if not line:

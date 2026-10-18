@@ -16,7 +16,7 @@ import torch
 from isaaclab.envs import ManagerBasedRLEnv
 
 from robolab.core.logging.recorder_manager import RobolabRecorderManager
-from robolab.core.world.world_state import get_world
+from robolab.core.world.world_state import clear_world_cache, get_world
 
 logger = logging.getLogger(__name__)
 
@@ -172,3 +172,9 @@ class RobolabEnv(ManagerBasedRLEnv):
         self._env_results.clear()
         self._env_term_step.clear()
         self._has_stepped = False
+
+    def close(self):
+        # The WorldState singleton holds this env; drop it so a later env in the
+        # same process (multi-task runs) starts without stale references.
+        clear_world_cache()
+        super().close()
