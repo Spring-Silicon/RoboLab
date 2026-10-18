@@ -133,6 +133,19 @@ def add_common_eval_args(parser: argparse.ArgumentParser) -> None:
                               "An eval process keeps only a few workers busy and idle default pools spin "
                               "several extra cores, so 4 keeps step time while letting more processes "
                               "share a machine. Only thread scheduling changes."))
+    parser.add_argument("--policy-query-mode", "--policy_query_mode", type=str, default="auto",
+                        choices=["auto", "serial", "concurrent", "batch"],
+                        help=("How to send the policy queries of envs that need a new action chunk at the same "
+                              "step. 'auto' (default): 'concurrent' only for clients whose server output does "
+                              "not depend on request order (none of the shipped policy servers), else 'serial'. "
+                              "'serial': the old loop, one env after the other. 'concurrent': one request per "
+                              "env, all sent at the same time over separate connections; a server with a "
+                              "shared RNG (pi0, GR00T, Cosmos) then gives each env other noise samples than "
+                              "'serial'. 'batch': one request for all envs (GR00T); the server output can "
+                              "differ from per-env requests. Clients that cannot use a mode fall back "
+                              "(batch -> concurrent -> serial)."))
+    parser.add_argument("--policy-query-workers", "--policy_query_workers", type=int, default=16,
+                        help="Maximum concurrent policy connections in 'concurrent' mode (default: 16).")
 
 
 def run_evaluation(
@@ -262,6 +275,7 @@ def run_evaluation(
             )
 
         client = client_factory(args)
+        client.configure_queries(mode=args.policy_query_mode, max_workers=args.policy_query_workers)
 
         run_idx = 0
         while True:
@@ -331,6 +345,7 @@ def run_evaluation(
             env.reset_eval_state()
             run_idx += 1
 
+        client.close()
         env.close()
 
     if args.task_queue:

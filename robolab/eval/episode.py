@@ -217,9 +217,8 @@ def run_episode(
 
             timer.start("policy_inference")
             # Infer actions for all active (non-frozen) envs in ONE call.
-            # Batching-capable clients send a single request for every env
-            # needing a replan; the InferenceClient default is a serial
-            # loop, so other policies behave exactly as before.
+            # The client sends the queries of all envs needing a replan together
+            # (one batched request or concurrent requests, see InferenceClient.configure_queries).
             actions = torch.zeros(env.num_envs, action_dim, device=env.device)
             last_viz = None
             active_env_ids = list(env.active_env_ids)
