@@ -31,6 +31,7 @@ class CameraRenderGate:
         gated = () if not self.every_step_groups else dict.fromkeys(
             name for names in group_sensors.values() for name in names if name not in every_step_sensors
         )
+        self._env = env
         sensors = env.scene.sensors
         unsupported = [name for name in gated if not hasattr(sensors[name], "set_render_product_enabled")]
         if unsupported:
@@ -61,8 +62,25 @@ class CameraRenderGate:
         return {"render": True, "camera_observations": self.every_step_groups}
 
     def restore(self):
-        """Enable all render products again (for resets and later episodes)."""
+        """Enable all render products again and render until they hold a frame (for resets and later episodes).
+
+        Resets read the cameras (for example the initial-state recorder reads their poses) before they render,
+        so the frames are rendered here without stepping the simulation; they show the final state of the episode.
+
+        Raises:
+            RuntimeError: If a camera delivers no frame within ``env.max_frame_delivery_renders`` renders.
+        """
         self._set_gated_enabled(True)
+        for _ in range(self._env.max_frame_delivery_renders):
+            if not any(sensor.frame_pending for sensor in self._gated):
+                return
+            self._env.sim.render()
+        pending = [sensor.cfg.prim_path for sensor in self._gated if sensor.frame_pending]
+        if pending:
+            raise RuntimeError(
+                f"Cameras {pending} delivered no frame within {self._env.max_frame_delivery_renders} renders after"
+                " their render products were enabled."
+            )
 
     def _set_gated_enabled(self, enabled: bool):
         for sensor in self._gated:

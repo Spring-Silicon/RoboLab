@@ -38,6 +38,8 @@ class FramebufferCamera(Camera):
         self.readbacks = 0
         self.render_product_enabled = True
         self.rendered_counters = []
+        # A render with the render product enabled updates the framebuffer at once: no frame is ever pending.
+        self.frame_pending = False
 
     def set_render_product_enabled(self, enabled):
         self.render_product_enabled = enabled

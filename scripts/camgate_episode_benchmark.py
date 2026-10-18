@@ -7,7 +7,8 @@ on every step whose observation groups are rendered. The action sequence does no
 gating, so the physics is the same in every configuration.
 
 Writes OUTPUT/measurement.json, run_N.hdf5, the episode videos, and OUTPUT/obs/run_N.npz with the per-step joint
-state and, on the query steps, a 1/8 downsampled copy of every image_obs image the client extracted.
+state and env.step wall time and, on the query steps, a 1/8 downsampled copy of every image_obs image the client
+extracted.
 """
 
 import argparse
@@ -145,9 +146,29 @@ try:
     env, cfg = create_env(a.task, num_envs=a.num_envs, seed=0, device=a.device)
     create_s = time.perf_counter() - created
     client = Client(a.open_loop_horizon)
+    # Per-step env.step wall times and the number of renders (gated steps that enable cameras again can
+    # render more than once before their observations are read).
+    step_ms, renders = [], [0]
+    _step, _render = env.step, env.sim.render
+
+    def timed_step(*args, **kwargs):
+        start = time.perf_counter()
+        try:
+            return _step(*args, **kwargs)
+        finally:
+            step_ms.append(1e3 * (time.perf_counter() - start))
+
+    def counted_render(*args, **kwargs):
+        renders[0] += 1
+        return _render(*args, **kwargs)
+
+    env.step = timed_step
+    env.sim.render = counted_render
     for run in range(a.repeats):
         env.reset_eval_state()
         client.begin_episode(run)
+        step_ms.clear()
+        renders[0] = 0
         start = time.perf_counter()
         start_unix = time.time()
         env_results, msgs, timing = run_episode(
@@ -169,12 +190,14 @@ try:
         np.savez_compressed(
             out / "obs" / f"run_{run}.npz", query_steps=np.array(log["query_steps"]),
             image_small=np.stack(log["image_small"]),
-            joint_pos=np.stack(log["joint_pos"]),
+            joint_pos=np.stack(log["joint_pos"]), step_ms=np.array(step_ms),
         )
         records.append({
             "run": run, "start_unix": start_unix, "end_unix": time.time(), "external_episode_s": episode_end - start,
             "summary_s": finished - episode_end, "evaluation_s": finished - start, "timing": timing,
             "results": env_results, "recorded_samples": counts, "queries": len(log["query_steps"]),
+            "env_step_ms_median": float(np.median(step_ms)), "env_step_ms_mean": float(np.mean(step_ms)),
+            "env_steps": len(step_ms), "renders": renders[0],
         })
     payload = {
         "task": a.task, "num_envs": a.num_envs, "video_mode": a.video_mode, "open_loop_horizon": a.open_loop_horizon,
