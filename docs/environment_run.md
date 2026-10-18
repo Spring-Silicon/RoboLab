@@ -389,6 +389,7 @@ The built-in `policies/pi0_family/run.py` supports the full set of evaluation fe
 | `--background-seed N` | Seed for reproducible per-task background sampling. Used with `--randomize-background`. | `None` |
 | `--limit-cpu-threads N` | Size of Kit's carb.tasking and TBB worker pools (Isaac Sim `limit_cpu_threads`). See [Running Many Evaluations per Machine](#running-many-evaluations-per-machine). | `4` |
 | `--task-queue` | Several processes started with the same task list and the same `--output-folder-name` share the tasks: each process claims the next free task with a file lock, so every process pays Kit startup once. See [Sharing a Task List Between Processes](#sharing-a-task-list-between-processes). | `False` |
+| `--queue-unit {task,run}` | With `--task-queue`: claim whole tasks (default) or single runs, so several processes play the runs of one task at the same time. See [Sharing a Task List Between Processes](#sharing-a-task-list-between-processes). | `task` |
 | `--policy-query-mode MODE` | How the client sends the policy queries of several envs that need a new action chunk at the same step: `auto`, `serial`, `concurrent` or `batch`. See [Sending Policy Queries Together](#sending-policy-queries-together). | `auto` |
 | `--policy-query-workers N` | Maximum number of server connections in `concurrent` mode. | `16` |
 | `--headless` | Run without live display window. **Recommended for multi-task runs** — see [GPU VRAM leak in non-headless mode](debug.md#gpu-vram-leak-in-non-headless-mode-across-environment-reloads) | `False` |
@@ -548,6 +549,12 @@ wait
 - When a process crashes, the operating system releases its locks. Start a process again with the same arguments: it resumes the unfinished episodes of free tasks, as for any reused output folder.
 - Each process appends to the shared `episode_results.jsonl` under a lock. At the end, each process prints the summary of all results in the folder at that time.
 - Each task runs in one process, so its episodes, seeds and outputs are the same as in a run without `--task-queue`.
+
+With `--queue-unit run`, a process claims single runs (`<task>.run<N>.lock`) instead of whole tasks. Several processes then play the runs of one task at the same time. Use it with `--num-envs 1` for long tasks, so that the 10 episodes of a 300 s task do not run one after the other:
+
+- A process creates the environment of a task only after it claims a run of that task. It plays more runs of the task while free runs remain, then moves to the next task in its list. Order the task list longest first.
+- Each process starts from a fresh environment. So the initial state of run `N` does not depend on runs `0..N-1`, as it does when one process plays every run. The outputs are not the same as a single-process run.
+- `--queue-unit run` needs a fixed `--num-runs`. It does not work with `--num-episodes-adaptive`.
 
 ## Evaluation Features
 
